@@ -22,7 +22,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/user', [AuthController::class, 'user']);
 
     // Work Entries
-    Route::get('/work-entries/stats', [WorkEntryController::class, 'stats']);
+    Route::get('/analytics/stats', [WorkEntryController::class, 'stats']);
     Route::apiResource('work-entries', WorkEntryController::class);
     Route::get('/analytics/weekly', [WorkEntryController::class, 'weeklyStats']);
 

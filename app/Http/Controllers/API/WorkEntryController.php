@@ -117,16 +117,16 @@ class WorkEntryController extends Controller
         $endDate = $now->toDateString();
 
         $entries = WorkEntry::where('user_id', $userId)
-            ->whereBetween('work_date', [$startDate, $endDate])
+            ->whereBetween('date', [$startDate, $endDate])
             ->get();
 
         // Weekly totals (rolling 7-day)
-        $totalHours = $entries->sum('total_hours');
+        $totalHours = $entries->sum('hours_worked');
         $totalEarnings = $entries->sum('earnings');
 
         // Today entries
-        $todayEntries = $entries->where('work_date', $now->toDateString());
-        $todayHours = $todayEntries->sum('total_hours');
+        $todayEntries = $entries->where('date', $now->toDateString());
+        $todayHours = $todayEntries->sum('hours_worked');
         $todayEarnings = $todayEntries->sum('earnings');
 
         // Constants
@@ -141,8 +141,8 @@ class WorkEntryController extends Controller
         // Yarın düşecek olan entry (7 gün önceki yarın = bugünden 6 gün önce)
         $tomorrowDropDate = $now->copy()->addDay()->subDays(6)->toDateString();
         $tomorrowDropHours = WorkEntry::where('user_id', $userId)
-            ->where('work_date', $tomorrowDropDate)
-            ->sum('total_hours');
+            ->where('date', $tomorrowDropDate)
+            ->sum('hours_worked');
 
         // Yarın için projected weekly hours
         $tomorrowProjectedWeekly = $totalHours - $tomorrowDropHours;

@@ -158,15 +158,12 @@ class WorkEntryController extends Controller
             ->where('date', $sixDaysAgo)
             ->sum('hours_worked');
 
-        if ($tomorrowExpiredHours > 0) {
-            // Rolling window logic
-            $todayOverwork = max(0, $todayHours - $expiredHours);
-            $tomorrowAvailable = max(0, min($dailyLimit, $tomorrowExpiredHours - $todayOverwork));
-        } else {
-            // Fallback: Use remaining weekly hours
-            $tomorrowRemainingAfterToday = $remainingWeekly - $todayHours;
-            $tomorrowAvailable = max(0, min($dailyLimit, $tomorrowRemainingAfterToday));
-        }
+        $tomorrowExpiredHours = WorkEntry::where('user_id', $userId)
+            ->where('date', $sixDaysAgo)
+            ->sum('hours_worked');
+
+        $remainingWeeklyAfterToday = $remainingWeekly - $todayHours;
+        $tomorrowAvailable = max(0, min($dailyLimit, $remainingWeeklyAfterToday + $tomorrowExpiredHours));
 
         return response()->json([
             'success' => true,

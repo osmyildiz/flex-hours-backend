@@ -32,7 +32,10 @@ class WorkEntryController extends Controller
             'earnings' => 'required|numeric|min:0',
             'miles' => 'nullable|numeric|min:0',
             'gas_cost' => 'nullable|numeric|min:0',
-            'notes' => 'nullable|string|max:1000'
+            'notes' => 'nullable|string|max:1000',
+            'base_pay' => 'nullable|numeric|min:0',
+            'tips' => 'nullable|numeric|min:0',
+            'service_type' => 'nullable|in:logistics,whole_foods,fresh'
         ]);
 
         $entry = Auth::user()->workEntries()->create($validated);
@@ -76,7 +79,10 @@ class WorkEntryController extends Controller
             'earnings' => 'sometimes|required|numeric|min:0',
             'miles' => 'nullable|numeric|min:0',
             'gas_cost' => 'nullable|numeric|min:0',
-            'notes' => 'nullable|string|max:1000'
+            'notes' => 'nullable|string|max:1000',
+            'base_pay' => 'nullable|numeric|min:0',
+            'tips' => 'nullable|numeric|min:0',
+            'service_type' => 'nullable|in:logistics,whole_foods,fresh'
         ]);
 
         $workEntry->update($validated);

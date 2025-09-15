@@ -15,9 +15,12 @@ class WorkEntry extends Model
         'hours_worked',
         'total_hours',
         'earnings',
+        'base_pay',      // YENİ
+        'tips',          // YENİ
+        'service_type',  // YENİ
         'miles',
         'gas_cost',
-        'notes',
+        'notes'
     ];
 
     protected $casts = [

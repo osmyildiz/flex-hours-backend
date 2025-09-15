@@ -157,6 +157,23 @@ class WorkEntryController extends Controller
         $tomorrowProjectedWeekly = $totalHours - $tomorrowDropHours;
         $tomorrowWeeklyAvailable = max(0, $weeklyLimit - $tomorrowProjectedWeekly);
         $tomorrowAvailable = min($dailyLimit, $tomorrowWeeklyAvailable);
+        // Recent activity (sadece bugünkü entries)
+        $todayRecentEntries = WorkEntry::where('user_id', $userId)
+            ->where('date', $today)
+            ->orderBy('created_at', 'desc')
+            ->get()
+            ->map(function ($entry) {
+                return [
+                    'id' => $entry->id,
+                    'date' => $entry->date,
+                    'hours_worked' => round($entry->hours_worked, 2),
+                    'earnings' => round($entry->earnings, 2),
+                    'base_pay' => $entry->base_pay ? round($entry->base_pay, 2) : null,
+                    'tips' => $entry->tips ? round($entry->tips, 2) : null,
+                    'service_type' => $entry->service_type,
+                    'created_at' => $entry->created_at->format('g:i A')
+                ];
+            });
 
         return response()->json([
             'success' => true,
@@ -188,7 +205,8 @@ class WorkEntryController extends Controller
                         'projected_weekly' => round($tomorrowProjectedWeekly, 2),
                         'weekly_available' => round($tomorrowWeeklyAvailable, 2)
                     ]
-                ]
+                ],
+                'recent_entries' => $todayRecentEntries
             ]
         ]);
     }

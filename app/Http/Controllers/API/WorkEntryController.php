@@ -116,11 +116,11 @@ class WorkEntryController extends Controller
             ->where('date', '<=', $now)
             ->get();
 
-        // Weekly totals (last 7 days including today)
+        // Weekly totals
         $totalHours = $entries->sum('hours_worked');
         $totalEarnings = $entries->sum('earnings');
 
-        // TODAY CALCULATION
+        // Today entries
         $today = $now->toDateString();
         $todayEntries = $entries->filter(function($entry) use ($today) {
             return Carbon::parse($entry->date)->toDateString() === $today;
@@ -129,28 +129,41 @@ class WorkEntryController extends Controller
         $todayHours = $todayEntries->sum('hours_worked');
         $todayEarnings = $todayEntries->sum('earnings');
 
-        // Hours that expire today (7 days ago)
+        // Weekly limits
+        $weeklyLimit = 40.0;
+        $dailyLimit = 8.0;
+        $remainingWeekly = max(0, $weeklyLimit - $totalHours);
+
+        // ROLLING WINDOW CALCULATION
         $sevenDaysAgo = $now->copy()->subDays(7)->toDateString();
         $expiredHours = WorkEntry::where('user_id', $userId)
             ->where('date', $sevenDaysAgo)
             ->sum('hours_worked');
 
-        // Today available = expired hours - today used
-        $todayAvailable = max(0, min(8, $expiredHours - $todayHours));
+        // TODAY AVAILABLE CALCULATION
+        if ($expiredHours > 0) {
+            // Rolling window logic
+            $todayAvailable = max(0, min($dailyLimit, $expiredHours - $todayHours));
+        } else {
+            // Fallback: No historical data
+            $todayAvailable = max(0, min($dailyLimit, $remainingWeekly - $todayHours));
+        }
 
-        // TOMORROW CALCULATION
+        // TOMORROW AVAILABLE CALCULATION
         $sixDaysAgo = $now->copy()->subDays(6)->toDateString();
         $tomorrowExpiredHours = WorkEntry::where('user_id', $userId)
             ->where('date', $sixDaysAgo)
             ->sum('hours_worked');
 
-        // Today's impact on tomorrow
-        $todayOverwork = max(0, $todayHours - $expiredHours);
-        $tomorrowAvailable = max(0, min(8, $tomorrowExpiredHours - $todayOverwork));
-
-        // Weekly limits
-        $weeklyLimit = 40.0;
-        $remainingWeekly = max(0, $weeklyLimit - $totalHours);
+        if ($tomorrowExpiredHours > 0) {
+            // Rolling window logic
+            $todayOverwork = max(0, $todayHours - $expiredHours);
+            $tomorrowAvailable = max(0, min($dailyLimit, $tomorrowExpiredHours - $todayOverwork));
+        } else {
+            // Fallback: Use remaining weekly hours
+            $tomorrowRemainingAfterToday = $remainingWeekly - $todayHours;
+            $tomorrowAvailable = max(0, min($dailyLimit, $tomorrowRemainingAfterToday));
+        }
 
         return response()->json([
             'success' => true,

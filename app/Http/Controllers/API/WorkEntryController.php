@@ -124,8 +124,11 @@ class WorkEntryController extends Controller
         $totalHours = $entries->sum('hours_worked');
         $totalEarnings = $entries->sum('earnings');
 
-        // Today entries
-        $todayEntries = $entries->where('date', $now->toDateString());
+        // Today entries (direct from database)
+        $today = $now->toDateString();
+        $todayEntries = WorkEntry::where('user_id', $userId)
+            ->where('date', $today)
+            ->get();
         $todayHours = $todayEntries->sum('hours_worked');
         $todayEarnings = $todayEntries->sum('earnings');
 

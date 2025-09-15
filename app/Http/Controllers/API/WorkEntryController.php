@@ -109,61 +109,45 @@ class WorkEntryController extends Controller
     {
         $user = Auth::user();
         $userTimezone = $user->timezone ?? 'UTC';
-
         $now = Carbon::now($userTimezone);
         $userId = $user->id;
 
-        // Rolling 7-day calculation
+        // ROLLING 7-DAY WINDOW (bugün dahil, 7 gün geriye)
+        $startDate = $now->copy()->subDays(6)->toDateString(); // 6 gün önce + bugün = 7 gün
+        $endDate = $now->toDateString();
+
         $entries = WorkEntry::where('user_id', $userId)
-            ->where('date', '>=', $now->copy()->subDays(6))
-            ->where('date', '<=', $now)
+            ->whereBetween('work_date', [$startDate, $endDate])
             ->get();
 
-        // Weekly totals
-        $totalHours = $entries->sum('hours_worked');
+        // Weekly totals (rolling 7-day)
+        $totalHours = $entries->sum('total_hours');
         $totalEarnings = $entries->sum('earnings');
 
         // Today entries
-        $today = $now->toDateString();
-        $todayEntries = $entries->filter(function($entry) use ($today) {
-            return Carbon::parse($entry->date)->toDateString() === $today;
-        });
-
-        $todayHours = $todayEntries->sum('hours_worked');
+        $todayEntries = $entries->where('work_date', $now->toDateString());
+        $todayHours = $todayEntries->sum('total_hours');
         $todayEarnings = $todayEntries->sum('earnings');
 
-        // Weekly limits
+        // Constants
         $weeklyLimit = 40.0;
         $dailyLimit = 8.0;
-        $remainingWeekly = max(0, $weeklyLimit - $totalHours);
-
-        // ROLLING WINDOW CALCULATION
-        $sevenDaysAgo = $now->copy()->subDays(7)->toDateString();
-        $expiredHours = WorkEntry::where('user_id', $userId)
-            ->where('date', $sevenDaysAgo)
-            ->sum('hours_worked');
 
         // TODAY AVAILABLE CALCULATION
-        if ($expiredHours > 0) {
-            // Rolling window logic
-            $todayAvailable = max(0, min($dailyLimit, $expiredHours - $todayHours));
-        } else {
-            // Fallback: New user, today quota = remaining today hours
-            $todayAvailable = max(0, $dailyLimit - $todayHours); // 8 - 3.6 = 4.4h
-        }
+        // Basit: Günlük limitten bugün çalışılan saati çıkar
+        $todayAvailable = max(0, $dailyLimit - $todayHours);
 
         // TOMORROW AVAILABLE CALCULATION
-        $sixDaysAgo = $now->copy()->subDays(6)->toDateString();
-        $tomorrowExpiredHours = WorkEntry::where('user_id', $userId)
-            ->where('date', $sixDaysAgo)
-            ->sum('hours_worked');
+        // Yarın düşecek olan entry (7 gün önceki yarın = bugünden 6 gün önce)
+        $tomorrowDropDate = $now->copy()->addDay()->subDays(6)->toDateString();
+        $tomorrowDropHours = WorkEntry::where('user_id', $userId)
+            ->where('work_date', $tomorrowDropDate)
+            ->sum('total_hours');
 
-        $tomorrowExpiredHours = WorkEntry::where('user_id', $userId)
-            ->where('date', $sixDaysAgo)
-            ->sum('hours_worked');
-
-        $remainingWeeklyAfterToday = $remainingWeekly - $todayHours;
-        $tomorrowAvailable = max(0, min($dailyLimit, $remainingWeeklyAfterToday + $tomorrowExpiredHours));
+        // Yarın için projected weekly hours
+        $tomorrowProjectedWeekly = $totalHours - $tomorrowDropHours;
+        $tomorrowWeeklyAvailable = max(0, $weeklyLimit - $tomorrowProjectedWeekly);
+        $tomorrowAvailable = min($dailyLimit, $tomorrowWeeklyAvailable);
 
         return response()->json([
             'success' => true,
@@ -173,8 +157,12 @@ class WorkEntryController extends Controller
                     'total_earnings' => round($totalEarnings, 2),
                     'total_miles' => round($entries->sum('miles'), 2),
                     'total_gas_cost' => round($entries->sum('gas_cost'), 2),
-                    'remaining_hours' => round($remainingWeekly, 2),
-                    'progress_percentage' => round(($totalHours / $weeklyLimit) * 100, 1)
+                    'remaining_hours' => round($weeklyLimit - $totalHours, 2),
+                    'progress_percentage' => round(($totalHours / $weeklyLimit) * 100, 1),
+                    'date_range' => [
+                        'start' => Carbon::parse($startDate)->format('M j'),
+                        'end' => $now->format('M j')
+                    ]
                 ],
                 'today' => [
                     'hours' => round($todayHours, 2),
@@ -183,7 +171,14 @@ class WorkEntryController extends Controller
                     'available_hours' => round($todayAvailable, 2)
                 ],
                 'tomorrow' => [
-                    'available_hours' => round($tomorrowAvailable, 2)
+                    'available_hours' => round($tomorrowAvailable, 2),
+                    'debug' => [
+                        'current_weekly' => round($totalHours, 2),
+                        'tomorrow_drop_date' => $tomorrowDropDate,
+                        'tomorrow_drop_hours' => round($tomorrowDropHours, 2),
+                        'projected_weekly' => round($tomorrowProjectedWeekly, 2),
+                        'weekly_available' => round($tomorrowWeeklyAvailable, 2)
+                    ]
                 ]
             ]
         ]);

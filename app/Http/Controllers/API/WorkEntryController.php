@@ -107,8 +107,11 @@ class WorkEntryController extends Controller
 
     public function weeklyStats(): JsonResponse
     {
-        $now = Carbon::now();
-        $userId = Auth::id();
+        $user = Auth::user();
+        $userTimezone = $user->timezone ?? 'UTC';
+
+        $now = Carbon::now($userTimezone);
+        $userId = $user->id;
 
         // Rolling 7-day calculation
         $entries = WorkEntry::where('user_id', $userId)

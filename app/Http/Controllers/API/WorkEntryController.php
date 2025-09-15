@@ -148,8 +148,8 @@ class WorkEntryController extends Controller
             // Rolling window logic
             $todayAvailable = max(0, min($dailyLimit, $expiredHours - $todayHours));
         } else {
-            // Fallback: No historical data
-            $todayAvailable = max(0, min($dailyLimit, $remainingWeekly - $todayHours));
+            // Fallback: New user, today quota = remaining today hours
+            $todayAvailable = max(0, $dailyLimit - $todayHours); // 8 - 3.6 = 4.4h
         }
 
         // TOMORROW AVAILABLE CALCULATION

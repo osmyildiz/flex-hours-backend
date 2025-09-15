@@ -245,7 +245,6 @@ class WorkEntryController extends Controller
                 'total_entries' => $entries->count(),
                 'total_earnings' => $entries->sum('earnings'),
                 'total_hours' => $entries->sum('hours_worked'),
-                'entries_by_date' => $entries->groupBy('date'),
             ]
         ]);
     }

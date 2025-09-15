@@ -210,7 +210,7 @@ class WorkEntryController extends Controller
             ]
         ]);
     }
-    public function analytics(Request $request): JsonResponse
+    public function stats(Request $request): JsonResponse
     {
         $period = $request->get('period', '30d');
         $userId = auth()->id();

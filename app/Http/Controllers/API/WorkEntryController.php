@@ -210,4 +210,43 @@ class WorkEntryController extends Controller
             ]
         ]);
     }
+    public function analytics(Request $request): JsonResponse
+    {
+        $period = $request->get('period', '30d');
+        $userId = auth()->id();
+
+        // Period'a göre gün sayısı
+        switch($period) {
+            case '7d':
+                $days = 7;
+                break;
+            case '30d':
+                $days = 30;
+                break;
+            case '3m':
+                $days = 90;
+                break;
+            default:
+                $days = 30;
+        }
+
+        $startDate = Carbon::now()->subDays($days);
+
+        // Entries al
+        $entries = WorkEntry::where('user_id', $userId)
+            ->where('date', '>=', $startDate)
+            ->orderBy('date', 'desc')
+            ->get();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'period' => $period,
+                'total_entries' => $entries->count(),
+                'total_earnings' => $entries->sum('earnings'),
+                'total_hours' => $entries->sum('hours_worked'),
+                'entries_by_date' => $entries->groupBy('date'),
+            ]
+        ]);
+    }
 }

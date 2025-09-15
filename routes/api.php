@@ -24,4 +24,5 @@ Route::middleware('auth:sanctum')->group(function () {
     // Work Entries
     Route::apiResource('work-entries', WorkEntryController::class);
     Route::get('/analytics/weekly', [WorkEntryController::class, 'weeklyStats']);
+    Route::get('/work-entries/analytics', [WorkEntryController::class, 'analytics']);
 });

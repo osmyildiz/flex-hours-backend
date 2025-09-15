@@ -108,38 +108,46 @@ class WorkEntryController extends Controller
     public function weeklyStats(): JsonResponse
     {
         $now = Carbon::now();
-        $sevenDaysAgo = $now->copy()->subDays(7);
+        $userId = Auth::id();
 
-        $entries = Auth::user()->workEntries()
-            ->where('date', '>=', $sevenDaysAgo)
+        // Rolling 7-day calculation
+        $entries = WorkEntry::where('user_id', $userId)
+            ->where('date', '>=', $now->copy()->subDays(6))
+            ->where('date', '<=', $now)
             ->get();
 
+        // Weekly totals (last 7 days including today)
         $totalHours = $entries->sum('hours_worked');
         $totalEarnings = $entries->sum('earnings');
-        $totalMiles = $entries->sum('miles');
-        $totalGasCost = $entries->sum('gas_cost');
 
-        // Today's stats
+        // TODAY CALCULATION
         $today = $now->toDateString();
         $todayEntries = $entries->where('date', $today);
         $todayHours = $todayEntries->sum('hours_worked');
         $todayEarnings = $todayEntries->sum('earnings');
 
-        // Calculate available hours
-        $weeklyLimit = 40.0;
-        $dailyLimit = 8.0;
-        $remainingWeekly = max(0, $weeklyLimit - $totalHours);
-        $todayAvailable = min($dailyLimit, $remainingWeekly);
-
-        // Tomorrow calculation (rolling window)
-        $tomorrow = $now->copy()->addDay()->toDateString();
-        $weekAgoFromTomorrow = $now->copy()->subDays(6)->toDateString();
-
-        $hoursToExpire = Auth::user()->workEntries()
-            ->where('date', $weekAgoFromTomorrow)
+        // Hours that expire today (7 days ago)
+        $sevenDaysAgo = $now->copy()->subDays(7)->toDateString();
+        $expiredHours = WorkEntry::where('user_id', $userId)
+            ->where('date', $sevenDaysAgo)
             ->sum('hours_worked');
 
-        $tomorrowAvailable = min($dailyLimit, $hoursToExpire);
+        // Today available = expired hours - today used
+        $todayAvailable = max(0, min(8, $expiredHours - $todayHours));
+
+        // TOMORROW CALCULATION
+        $sixDaysAgo = $now->copy()->subDays(6)->toDateString();
+        $tomorrowExpiredHours = WorkEntry::where('user_id', $userId)
+            ->where('date', $sixDaysAgo)
+            ->sum('hours_worked');
+
+        // Today's impact on tomorrow
+        $todayOverwork = max(0, $todayHours - $expiredHours);
+        $tomorrowAvailable = max(0, min(8, $tomorrowExpiredHours - $todayOverwork));
+
+        // Weekly limits
+        $weeklyLimit = 40.0;
+        $remainingWeekly = max(0, $weeklyLimit - $totalHours);
 
         return response()->json([
             'success' => true,
@@ -147,8 +155,6 @@ class WorkEntryController extends Controller
                 'weekly' => [
                     'total_hours' => round($totalHours, 2),
                     'total_earnings' => round($totalEarnings, 2),
-                    'total_miles' => round($totalMiles, 2),
-                    'total_gas_cost' => round($totalGasCost, 2),
                     'remaining_hours' => round($remainingWeekly, 2),
                     'progress_percentage' => round(($totalHours / $weeklyLimit) * 100, 1)
                 ],

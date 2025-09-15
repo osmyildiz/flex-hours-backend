@@ -122,7 +122,10 @@ class WorkEntryController extends Controller
 
         // TODAY CALCULATION
         $today = $now->toDateString();
-        $todayEntries = $entries->where('date', $today);
+        $todayEntries = $entries->filter(function($entry) use ($today) {
+            return Carbon::parse($entry->date)->toDateString() === $today;
+        });
+
         $todayHours = $todayEntries->sum('hours_worked');
         $todayEarnings = $todayEntries->sum('earnings');
 
@@ -155,6 +158,8 @@ class WorkEntryController extends Controller
                 'weekly' => [
                     'total_hours' => round($totalHours, 2),
                     'total_earnings' => round($totalEarnings, 2),
+                    'total_miles' => round($entries->sum('miles'), 2),
+                    'total_gas_cost' => round($entries->sum('gas_cost'), 2),
                     'remaining_hours' => round($remainingWeekly, 2),
                     'progress_percentage' => round(($totalHours / $weeklyLimit) * 100, 1)
                 ],

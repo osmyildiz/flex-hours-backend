@@ -21,13 +21,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/user', [AuthController::class, 'user']);
 
-    // Work Entries
+    // Analytics
     Route::get('/analytics/stats', [WorkEntryController::class, 'stats']);
-    Route::apiResource('work-entries', WorkEntryController::class);
     Route::get('/analytics/weekly', [WorkEntryController::class, 'weeklyStats']);
+
+    // Work Entries - SPECIFIC ROUTES ÖNCE
     Route::get('/work-entries/years', [WorkEntryController::class, 'getAvailableYears']);
     Route::get('/work-entries/monthly/{year}', [WorkEntryController::class, 'getMonthlyData']);
     Route::get('/work-entries/daily/{year}/{month}', [WorkEntryController::class, 'getDailyEntries']);
     Route::get('/work-entries/search', [WorkEntryController::class, 'searchEntries']);
 
+    // Work Entries - GENERIC RESOURCE SONRA
+    Route::apiResource('work-entries', WorkEntryController::class);
 });

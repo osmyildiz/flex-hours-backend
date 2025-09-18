@@ -248,4 +248,223 @@ class WorkEntryController extends Controller
             ]
         ]);
     }
+    public function getAvailableYears(Request $request): JsonResponse
+    {
+        $userId = auth()->id();
+
+        $years = WorkEntry::where('user_id', $userId)
+            ->selectRaw('DISTINCT YEAR(date) as year')
+            ->orderBy('year', 'desc')
+            ->pluck('year')
+            ->toArray();
+
+        // If no entries, return current year
+        if (empty($years)) {
+            $years = [date('Y')];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $years,
+        ]);
+    }
+
+    /**
+     * Get monthly summary data for a specific year
+     */
+    public function getMonthlyData(Request $request, $year): JsonResponse
+    {
+        $userId = auth()->id();
+
+        $entries = WorkEntry::where('user_id', $userId)
+            ->whereYear('date', $year)
+            ->orderBy('date', 'desc')
+            ->get();
+
+        // Group by month
+        $monthlyData = [];
+
+        for ($month = 1; $month <= 12; $month++) {
+            $monthEntries = $entries->filter(function ($entry) use ($month) {
+                return Carbon::parse($entry->date)->month == $month;
+            });
+
+            $totalEarnings = $monthEntries->sum('earnings');
+            $totalHours = $monthEntries->sum('hours_worked');
+            $totalEntries = $monthEntries->count();
+
+            $monthlyData[] = [
+                'month' => $month,
+                'month_name' => Carbon::create()->month($month)->format('M'),
+                'total_earnings' => round($totalEarnings, 2),
+                'total_hours' => round($totalHours, 2),
+                'total_entries' => $totalEntries,
+                'avg_hourly_rate' => $totalHours > 0 ? round($totalEarnings / $totalHours, 2) : 0,
+                'has_entries' => $totalEntries > 0,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'year' => $year,
+                'months' => $monthlyData,
+                'yearly_totals' => [
+                    'total_earnings' => round($entries->sum('earnings'), 2),
+                    'total_hours' => round($entries->sum('hours_worked'), 2),
+                    'total_entries' => $entries->count(),
+                ]
+            ],
+        ]);
+    }
+
+    /**
+     * Get daily entries for a specific month
+     */
+    public function getDailyEntries(Request $request, $year, $month): JsonResponse
+    {
+        $request->validate([
+            'page' => 'integer|min:1',
+            'per_page' => 'integer|min:1|max:100',
+        ]);
+
+        $userId = auth()->id();
+        $perPage = $request->get('per_page', 30);
+        $page = $request->get('page', 1);
+
+        $entries = WorkEntry::where('user_id', $userId)
+            ->whereYear('date', $year)
+            ->whereMonth('date', $month)
+            ->orderBy('date', 'desc')
+            ->get();
+
+        // Group entries by date
+        $groupedEntries = $entries->groupBy(function ($entry) {
+            return Carbon::parse($entry->date)->format('Y-m-d');
+        });
+
+        $formattedGroups = $groupedEntries->map(function ($dateEntries, $date) {
+            return [
+                'date' => $date,
+                'formatted_date' => Carbon::parse($date)->format('M j, Y'),
+                'day_name' => Carbon::parse($date)->format('l'),
+                'total_earnings' => round($dateEntries->sum('earnings'), 2),
+                'total_hours' => round($dateEntries->sum('hours_worked'), 2),
+                'entry_count' => $dateEntries->count(),
+                'entries' => $dateEntries->map(function ($entry) {
+                    return [
+                        'id' => $entry->id,
+                        'hours_worked' => $entry->hours_worked,
+                        'earnings' => $entry->earnings,
+                        'base_pay' => $entry->base_pay ?? 0,
+                        'tips' => $entry->tips ?? 0,
+                        'notes' => $entry->notes ?? '',
+                        'created_at' => $entry->created_at,
+                    ];
+                }),
+            ];
+        })->values();
+
+        // Simple pagination
+        $total = $formattedGroups->count();
+        $offset = ($page - 1) * $perPage;
+        $paginatedGroups = $formattedGroups->slice($offset, $perPage)->values();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'daily_groups' => $paginatedGroups,
+                'pagination' => [
+                    'current_page' => $page,
+                    'per_page' => $perPage,
+                    'total' => $total,
+                    'has_more_pages' => ($offset + $perPage) < $total,
+                ],
+                'month_summary' => [
+                    'year' => $year,
+                    'month' => $month,
+                    'month_name' => Carbon::create()->month($month)->format('F Y'),
+                    'total_entries' => $entries->count(),
+                    'total_earnings' => round($entries->sum('earnings'), 2),
+                    'total_hours' => round($entries->sum('hours_worked'), 2),
+                ],
+            ],
+        ]);
+    }
+
+    /**
+     * Search entries with flexible filters
+     */
+    public function searchEntries(Request $request): JsonResponse
+    {
+        $request->validate([
+            'search' => 'string|nullable',
+            'start_date' => 'date|nullable',
+            'end_date' => 'date|nullable',
+            'min_earnings' => 'numeric|nullable',
+            'max_earnings' => 'numeric|nullable',
+            'page' => 'integer|min:1',
+            'per_page' => 'integer|min:1|max:100',
+        ]);
+
+        $userId = auth()->id();
+        $perPage = $request->get('per_page', 30);
+        $page = $request->get('page', 1);
+
+        $query = WorkEntry::where('user_id', $userId);
+
+        // Date range filters
+        if ($request->start_date) {
+            $query->where('date', '>=', $request->start_date);
+        }
+        if ($request->end_date) {
+            $query->where('date', '<=', $request->end_date);
+        }
+
+        // Earnings range
+        if ($request->min_earnings) {
+            $query->where('earnings', '>=', $request->min_earnings);
+        }
+        if ($request->max_earnings) {
+            $query->where('earnings', '<=', $request->max_earnings);
+        }
+
+        // Text search in notes
+        if ($request->search) {
+            $query->where('notes', 'LIKE', '%' . $request->search . '%');
+        }
+
+        $entries = $query->orderBy('date', 'desc')->get();
+
+        // Simple pagination
+        $total = $entries->count();
+        $offset = ($page - 1) * $perPage;
+        $paginatedEntries = $entries->slice($offset, $perPage)->values();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'entries' => $paginatedEntries,
+                'pagination' => [
+                    'current_page' => $page,
+                    'per_page' => $perPage,
+                    'total' => $total,
+                    'has_more_pages' => ($offset + $perPage) < $total,
+                ],
+                'filters_applied' => [
+                    'search' => $request->search,
+                    'start_date' => $request->start_date,
+                    'end_date' => $request->end_date,
+                    'min_earnings' => $request->min_earnings,
+                    'max_earnings' => $request->max_earnings,
+                ],
+                'summary' => [
+                    'total_earnings' => round($entries->sum('earnings'), 2),
+                    'total_hours' => round($entries->sum('hours_worked'), 2),
+                    'total_entries' => $entries->count(),
+                ],
+            ],
+        ]);
+    }
+
 }

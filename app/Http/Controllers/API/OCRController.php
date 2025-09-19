@@ -17,8 +17,6 @@ class OCRController extends Controller
      */
     public function processScreenshot(Request $request)
     {
-        \Log::info("OCR ENDPOINT HIT - THIS IS THE NEW CONTROLLER");
-
         $request->validate([
             'image' => 'required|image|max:10240', // 10MB max
         ]);
@@ -29,14 +27,9 @@ class OCRController extends Controller
             // Save uploaded image
             $image = $request->file('image');
             $imagePath = $image->store('ocr_uploads', 'public');
-
-            // FIX: Correct path construction
-            $fullPath = Storage::disk('public')->path($imagePath);
+            $fullPath = storage_path('app/public/' . $imagePath);
 
             Log::info("OCR: Processing image", ['user_id' => $userId, 'path' => $fullPath]);
-
-            // Validate image file
-            $this->validateImageFile($fullPath);
 
             // Try GPT-4 Vision first
             $result = $this->processWithGPTVision($fullPath);
@@ -135,80 +128,30 @@ class OCRController extends Controller
     }
 
     /**
-     * Validate image file before processing
-     */
-    private function validateImageFile($imagePath)
-    {
-        if (!file_exists($imagePath)) {
-            throw new \Exception('Image file not found: ' . $imagePath);
-        }
-
-        $fileSize = filesize($imagePath);
-        if ($fileSize === false || $fileSize === 0) {
-            throw new \Exception('Invalid or empty image file');
-        }
-
-        // Check if file is too large (20MB limit for OpenAI)
-        if ($fileSize > 20 * 1024 * 1024) {
-            throw new \Exception('Image file too large (max 20MB)');
-        }
-
-        // Validate image dimensions and type
-        $imageInfo = getimagesize($imagePath);
-        if ($imageInfo === false) {
-            throw new \Exception('Invalid image file format');
-        }
-
-        Log::info("Image validation passed", [
-            'size' => $fileSize,
-            'dimensions' => $imageInfo[0] . 'x' . $imageInfo[1],
-            'mime' => $imageInfo['mime']
-        ]);
-    }
-
-    /**
      * Process image with OpenAI GPT-4 Vision API
      */
     private function processWithGPTVision($imagePath)
     {
         try {
-            Log::info("GPT-4 Vision method called", ['path' => $imagePath]);
-
             if (!env('OPENAI_API_KEY')) {
-                Log::error("OpenAI API key not configured");
                 return ['success' => false, 'error' => 'OpenAI API key not configured'];
-            }
-
-            // Test API key first
-            $testResponse = Http::timeout(10)->withHeaders([
-                'Authorization' => 'Bearer ' . env('OPENAI_API_KEY'),
-            ])->get('https://api.openai.com/v1/models');
-
-            if (!$testResponse->successful()) {
-                Log::error("OpenAI API key test failed", ['status' => $testResponse->status()]);
-                return ['success' => false, 'error' => 'Invalid OpenAI API key or service unavailable'];
             }
 
             Log::info("Starting GPT-4 Vision processing", ['path' => $imagePath]);
 
-            // FIX: Better file reading with error handling
-            $imageContent = file_get_contents($imagePath);
-            if ($imageContent === false) {
-                throw new \Exception('Failed to read image file: ' . $imagePath);
+            // Verify file exists and read it
+            if (!file_exists($imagePath)) {
+                throw new \Exception('Image file not found: ' . $imagePath);
             }
 
-            $base64Image = base64_encode($imageContent);
-            if (!$base64Image) {
-                throw new \Exception('Failed to encode image to base64');
-            }
-
+            $base64Image = base64_encode(file_get_contents($imagePath));
             $mimeType = $this->getMimeType($imagePath);
 
-            $response = Http::timeout(120)->connectTimeout(30)->withHeaders([
+            $response = Http::timeout(60)->withHeaders([
                 'Authorization' => 'Bearer ' . env('OPENAI_API_KEY'),
                 'Content-Type' => 'application/json',
             ])->post('https://api.openai.com/v1/chat/completions', [
-                'model' => 'gpt-4-turbo', // FIX: Updated model name
+                'model' => 'gpt-4o', // Latest vision model
                 'messages' => [
                     [
                         'role' => 'user',
@@ -266,11 +209,6 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
                 'temperature' => 0.1 // Low temperature for consistent parsing
             ]);
 
-            Log::info("OpenAI API Response", [
-                'status' => $response->status(),
-                'successful' => $response->successful()
-            ]);
-
             if ($response->successful()) {
                 $data = $response->json();
 
@@ -309,8 +247,7 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
             Log::error("OpenAI API failed", [
                 'status' => $response->status(),
                 'body' => $errorBody,
-                'error' => $errorData['error'] ?? 'Unknown error',
-                'headers' => $response->headers()
+                'error' => $errorData['error'] ?? 'Unknown error'
             ]);
 
             return ['success' => false, 'error' => 'OpenAI API failed: ' . ($errorData['error']['message'] ?? $errorBody)];
@@ -485,34 +422,6 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
             ];
         } catch (\Exception $e) {
             Log::error("parseEntry failed", ['error' => $e->getMessage()]);
-            return null;
-        }
-    }
-
-    /**
-     * Parse time range from Tesseract line
-     */
-    private function parseTimeRange($timeLine)
-    {
-        try {
-            // Handle different time range formats
-            $patterns = [
-                '/(\d{1,2}:\d{2}\s+(?:AM|PM))\s*[-–—]\s*(\d{1,2}:\d{2}\s+(?:AM|PM))/i',
-                '/(\d{1,2}:\d{2}(?:AM|PM))\s*[-–—]\s*(\d{1,2}:\d{2}(?:AM|PM))/i',
-            ];
-
-            foreach ($patterns as $pattern) {
-                if (preg_match($pattern, $timeLine, $matches)) {
-                    return [
-                        'start' => trim($matches[1]),
-                        'end' => trim($matches[2])
-                    ];
-                }
-            }
-
-            return null;
-        } catch (\Exception $e) {
-            Log::error("parseTimeRange failed", ['line' => $timeLine, 'error' => $e->getMessage()]);
             return null;
         }
     }
@@ -760,7 +669,7 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
     {
         $patterns = [
             '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/i',
-            '/\d{1,2}:\d{2}\s+(AM|PM)\s*[-–—]\s*\d{1,2}:\d{2}\s+(AM|PM)/i',
+            '/\d{1,2}:\d{2}\s+(AM|PM)\s*[-–]\s*\d{1,2}:\d{2}\s+(AM|PM)/i',
         ];
 
         foreach ($patterns as $pattern) {
@@ -813,36 +722,13 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
     }
 
     /**
-     * Get MIME type of image - FIXED VERSION
+     * Get MIME type of image
      */
     private function getMimeType($imagePath)
     {
-        // Try finfo first
         $finfo = finfo_open(FILEINFO_MIME_TYPE);
         $mimeType = finfo_file($finfo, $imagePath);
         finfo_close($finfo);
-
-        if ($mimeType && $mimeType !== 'application/octet-stream') {
-            return $mimeType;
-        }
-
-        // Fallback to getimagesize
-        $imageInfo = getimagesize($imagePath);
-        if ($imageInfo && isset($imageInfo['mime'])) {
-            return $imageInfo['mime'];
-        }
-
-        // Final fallback based on file extension
-        $extension = strtolower(pathinfo($imagePath, PATHINFO_EXTENSION));
-        $mimeTypes = [
-            'jpg' => 'image/jpeg',
-            'jpeg' => 'image/jpeg',
-            'png' => 'image/png',
-            'gif' => 'image/gif',
-            'bmp' => 'image/bmp',
-            'webp' => 'image/webp'
-        ];
-
-        return $mimeTypes[$extension] ?? 'image/jpeg';
+        return $mimeType ?: 'image/jpeg';
     }
 }

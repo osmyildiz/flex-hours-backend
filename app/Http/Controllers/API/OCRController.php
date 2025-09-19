@@ -19,6 +19,7 @@ class OCRController extends Controller
         $request->validate([
             'image' => 'required|image|max:10240', // 10MB max
         ]);
+
         $userId = auth()->id();
 
         try {
@@ -79,6 +80,11 @@ class OCRController extends Controller
                 'trace' => $e->getTraceAsString()
             ]);
 
+            // Clean up file if it exists
+            if (isset($imagePath)) {
+                Storage::disk('public')->delete($imagePath);
+            }
+
             return response()->json([
                 'success' => false,
                 'message' => 'OCR processing failed: ' . $e->getMessage(),
@@ -94,7 +100,12 @@ class OCRController extends Controller
         try {
             Log::info("Starting OCR extraction", ['path' => $imagePath]);
 
-            $command = "tesseract '$imagePath' stdout 2>&1";
+            // Verify file exists
+            if (!file_exists($imagePath)) {
+                throw new \Exception('Image file not found: ' . $imagePath);
+            }
+
+            $command = "tesseract '" . escapeshellarg($imagePath) . "' stdout 2>&1";
             $output = shell_exec($command);
 
             Log::info("Tesseract output", ['output' => $output]);
@@ -103,11 +114,24 @@ class OCRController extends Controller
                 throw new \Exception('Tesseract OCR failed to process image');
             }
 
-            return trim($output);
+            return $this->cleanOCRText($output);
         } catch (\Exception $e) {
             Log::error("extractTextFromImage failed", ['error' => $e->getMessage()]);
             throw $e;
         }
+    }
+
+    /**
+     * Clean OCR text from artifacts
+     */
+    private function cleanOCRText($text)
+    {
+        // Remove common OCR artifacts and normalize whitespace
+        $text = preg_replace('/[^\x20-\x7E\n\r\t]/', '', $text); // Remove non-printable chars
+        $text = preg_replace('/\s+/', ' ', $text); // Normalize whitespace
+        $text = str_replace('\n', "\n", $text); // Ensure proper line breaks
+
+        return trim($text);
     }
 
     /**
@@ -158,7 +182,7 @@ class OCRController extends Controller
     {
         try {
             $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}$/';
-            return preg_match($pattern, $line);
+            return preg_match($pattern, $line) === 1;
         } catch (\Exception $e) {
             Log::error("isDateLine failed", ['line' => $line, 'error' => $e->getMessage()]);
             return false;
@@ -171,7 +195,9 @@ class OCRController extends Controller
     private function parseEntry($lines, $startIndex)
     {
         try {
-            if ($startIndex >= count($lines)) return null;
+            if ($startIndex >= count($lines)) {
+                return null;
+            }
 
             $dateLine = $lines[$startIndex];
             $timeLine = null;
@@ -181,7 +207,9 @@ class OCRController extends Controller
 
             // Look for related data in next few lines
             for ($i = $startIndex + 1; $i < count($lines) && $i < $startIndex + 6; $i++) {
-                if ($i >= count($lines)) break;
+                if ($i >= count($lines)) {
+                    break;
+                }
 
                 $line = $lines[$i];
 
@@ -197,11 +225,14 @@ class OCRController extends Controller
 
                 // Check for base/tips: "Base: $51 Tips: $48"
                 if (strpos($line, 'Base:') !== false && strpos($line, 'Tips:') !== false) {
-                    if (preg_match('/Base:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
-                        $basePay = isset($matches[1]) ? floatval($matches[1]) : null;
+                    $baseMatches = $this->safeRegexMatch('/Base:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, 1);
+                    if ($baseMatches) {
+                        $basePay = floatval($baseMatches[1]);
                     }
-                    if (preg_match('/Tips:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
-                        $tips = isset($matches[1]) ? floatval($matches[1]) : null;
+
+                    $tipMatches = $this->safeRegexMatch('/Tips:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, 1);
+                    if ($tipMatches) {
+                        $tips = floatval($tipMatches[1]);
                     }
                 }
 
@@ -211,17 +242,29 @@ class OCRController extends Controller
                 }
             }
 
-            // Validate entry
+            // Validate required fields
             if (!$timeLine || $totalEarnings === null) {
+                Log::warning("Entry missing required fields", [
+                    'date_line' => $dateLine,
+                    'time_line' => $timeLine,
+                    'earnings' => $totalEarnings
+                ]);
                 return null;
             }
 
             // Parse date
             $parsedDate = $this->parseDate($dateLine);
-            if (!$parsedDate) return null;
+            if (!$parsedDate) {
+                Log::warning("Failed to parse date", ['date_line' => $dateLine]);
+                return null;
+            }
 
             // Calculate hours
             $hoursWorked = $this->calculateHours($timeLine);
+            if ($hoursWorked <= 0) {
+                Log::warning("Invalid hours calculated", ['time_line' => $timeLine, 'hours' => $hoursWorked]);
+                return null;
+            }
 
             // Determine service type
             $serviceType = ($basePay !== null && $tips !== null) ? 'whole_foods' : 'logistics';
@@ -238,7 +281,11 @@ class OCRController extends Controller
                 'is_valid' => $totalEarnings > 0 && $hoursWorked > 0,
             ];
         } catch (\Exception $e) {
-            Log::error("parseEntry failed", ['error' => $e->getMessage()]);
+            Log::error("parseEntry failed", [
+                'start_index' => $startIndex,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
             return null;
         }
     }
@@ -250,7 +297,7 @@ class OCRController extends Controller
     {
         try {
             $pattern = '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/';
-            return preg_match($pattern, $line);
+            return preg_match($pattern, $line) === 1;
         } catch (\Exception $e) {
             Log::error("isTimeLine failed", ['line' => $line, 'error' => $e->getMessage()]);
             return false;
@@ -264,7 +311,7 @@ class OCRController extends Controller
     {
         try {
             $pattern = '/^\$\d+(?:\.\d{2})?$/';
-            return preg_match($pattern, $line);
+            return preg_match($pattern, $line) === 1;
         } catch (\Exception $e) {
             Log::error("isEarningsLine failed", ['line' => $line, 'error' => $e->getMessage()]);
             return false;
@@ -277,8 +324,9 @@ class OCRController extends Controller
     private function parseEarnings($line)
     {
         try {
-            if (preg_match('/\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
-                return isset($matches[1]) ? floatval($matches[1]) : null;
+            $matches = $this->safeRegexMatch('/\$([0-9]+(?:\.[0-9]{2})?)/', $line, 1);
+            if ($matches) {
+                return floatval($matches[1]);
             }
             return null;
         } catch (\Exception $e) {
@@ -296,18 +344,14 @@ class OCRController extends Controller
             Log::info("Parsing date line: " . $dateLine);
 
             $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/';
+            $matches = $this->safeRegexMatch($pattern, $dateLine, 3);
 
-            if (preg_match($pattern, $dateLine, $matches)) {
+            if ($matches) {
                 Log::info("Date matches", ['matches' => $matches]);
 
-                // Safe array access
-                $monthName = $matches[2] ?? null;
-                $day = isset($matches[3]) ? intval($matches[3]) : null;
-
-                if (!$monthName || !$day) {
-                    Log::error("Invalid date parts", ['month' => $monthName, 'day' => $day]);
-                    return null;
-                }
+                $dayName = $matches[1];
+                $monthName = $matches[2];
+                $day = intval($matches[3]);
 
                 $months = [
                     'Jan' => 1, 'Feb' => 2, 'Mar' => 3, 'Apr' => 4,
@@ -315,10 +359,30 @@ class OCRController extends Controller
                     'Sep' => 9, 'Oct' => 10, 'Nov' => 11, 'Dec' => 12,
                 ];
 
-                $month = $months[$monthName] ?? 1;
+                if (!isset($months[$monthName])) {
+                    Log::error("Invalid month name", ['month' => $monthName]);
+                    return null;
+                }
+
+                if ($day < 1 || $day > 31) {
+                    Log::error("Invalid day", ['day' => $day]);
+                    return null;
+                }
+
+                $month = $months[$monthName];
                 $year = date('Y');
 
-                return Carbon::createFromDate($year, $month, $day);
+                try {
+                    return Carbon::createFromDate($year, $month, $day);
+                } catch (\Exception $e) {
+                    Log::error("Carbon date creation failed", [
+                        'year' => $year,
+                        'month' => $month,
+                        'day' => $day,
+                        'error' => $e->getMessage()
+                    ]);
+                    return null;
+                }
             }
 
             Log::info("Date pattern did not match");
@@ -336,23 +400,50 @@ class OCRController extends Controller
     {
         try {
             $pattern = '/^(\d{1,2}):(\d{2})\s+(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s+(AM|PM)$/';
+            $matches = $this->safeRegexMatch($pattern, $timeRange, 6);
 
-            if (preg_match($pattern, $timeRange, $matches)) {
-                // Safe array access
-                $startHour = isset($matches[1]) ? intval($matches[1]) : 0;
-                $startMinute = isset($matches[2]) ? intval($matches[2]) : 0;
-                $startPeriod = $matches[3] ?? 'AM';
+            if ($matches) {
+                $startHour = intval($matches[1]);
+                $startMinute = intval($matches[2]);
+                $startPeriod = $matches[3];
 
-                $endHour = isset($matches[4]) ? intval($matches[4]) : 0;
-                $endMinute = isset($matches[5]) ? intval($matches[5]) : 0;
-                $endPeriod = $matches[6] ?? 'AM';
+                $endHour = intval($matches[4]);
+                $endMinute = intval($matches[5]);
+                $endPeriod = $matches[6];
+
+                // Validate time components
+                if ($startHour < 1 || $startHour > 12 || $endHour < 1 || $endHour > 12) {
+                    Log::error("Invalid hour values", [
+                        'start_hour' => $startHour,
+                        'end_hour' => $endHour,
+                        'time_range' => $timeRange
+                    ]);
+                    return 2.0; // Fallback
+                }
+
+                if ($startMinute < 0 || $startMinute > 59 || $endMinute < 0 || $endMinute > 59) {
+                    Log::error("Invalid minute values", [
+                        'start_minute' => $startMinute,
+                        'end_minute' => $endMinute,
+                        'time_range' => $timeRange
+                    ]);
+                    return 2.0; // Fallback
+                }
 
                 // Convert to 24-hour format
-                if ($startPeriod === 'PM' && $startHour !== 12) $startHour += 12;
-                if ($startPeriod === 'AM' && $startHour === 12) $startHour = 0;
+                if ($startPeriod === 'PM' && $startHour !== 12) {
+                    $startHour += 12;
+                }
+                if ($startPeriod === 'AM' && $startHour === 12) {
+                    $startHour = 0;
+                }
 
-                if ($endPeriod === 'PM' && $endHour !== 12) $endHour += 12;
-                if ($endPeriod === 'AM' && $endHour === 12) $endHour = 0;
+                if ($endPeriod === 'PM' && $endHour !== 12) {
+                    $endHour += 12;
+                }
+                if ($endPeriod === 'AM' && $endHour === 12) {
+                    $endHour = 0;
+                }
 
                 // Calculate duration in minutes
                 $startMinutes = ($startHour * 60) + $startMinute;
@@ -364,13 +455,51 @@ class OCRController extends Controller
                 }
 
                 $durationMinutes = $endMinutes - $startMinutes;
+
+                if ($durationMinutes <= 0) {
+                    Log::warning("Zero or negative duration calculated", [
+                        'time_range' => $timeRange,
+                        'duration_minutes' => $durationMinutes
+                    ]);
+                    return 2.0; // Fallback
+                }
+
                 return round($durationMinutes / 60, 2);
             }
 
+            Log::warning("Time pattern did not match", ['time_range' => $timeRange]);
             return 2.0; // Fallback
         } catch (\Exception $e) {
             Log::error("calculateHours failed", ['timeRange' => $timeRange, 'error' => $e->getMessage()]);
-            return 2.0;
+            return 2.0; // Fallback
+        }
+    }
+
+    /**
+     * Safe regex matching with validation
+     */
+    private function safeRegexMatch($pattern, $subject, $expectedGroups = 1)
+    {
+        try {
+            if (preg_match($pattern, $subject, $matches)) {
+                if (count($matches) >= $expectedGroups + 1) { // +1 for full match
+                    return $matches;
+                }
+                Log::warning("Regex matched but insufficient groups", [
+                    'pattern' => $pattern,
+                    'subject' => $subject,
+                    'expected' => $expectedGroups,
+                    'actual' => count($matches) - 1
+                ]);
+            }
+            return false;
+        } catch (\Exception $e) {
+            Log::error("safeRegexMatch failed", [
+                'pattern' => $pattern,
+                'subject' => $subject,
+                'error' => $e->getMessage()
+            ]);
+            return false;
         }
     }
 }

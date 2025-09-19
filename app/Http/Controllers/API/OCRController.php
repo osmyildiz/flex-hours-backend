@@ -279,13 +279,19 @@ class OCRController extends Controller
         return null;
     }
 
-// calculateHours method'unu da güvenli hale getir:
+
+
+
+    /**
+     * Calculate hours from time range
+     */
+    // Mevcut method'u bulup sadece bu kısmı değiştir:
     private function calculateHours($timeRange)
     {
         $pattern = '/^(\d{1,2}):(\d{2})\s+(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s+(AM|PM)$/';
 
         if (preg_match($pattern, $timeRange, $matches)) {
-            // Safe array access
+            // Safe array access - SADECE BU SATIRLARI DEĞİŞTİR
             $startHour = isset($matches[1]) ? intval($matches[1]) : 0;
             $startMinute = isset($matches[2]) ? intval($matches[2]) : 0;
             $startPeriod = $matches[3] ?? 'AM';
@@ -294,29 +300,7 @@ class OCRController extends Controller
             $endMinute = isset($matches[5]) ? intval($matches[5]) : 0;
             $endPeriod = $matches[6] ?? 'AM';
 
-            // ... rest of calculation
-        }
-
-        return 2.0; // Fallback
-    }
-
-    /**
-     * Calculate hours from time range
-     */
-    private function calculateHours($timeRange)
-    {
-        $pattern = '/^(\d{1,2}):(\d{2})\s+(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s+(AM|PM)$/';
-
-        if (preg_match($pattern, $timeRange, $matches)) {
-            $startHour = intval($matches[1]);
-            $startMinute = intval($matches[2]);
-            $startPeriod = $matches[3];
-
-            $endHour = intval($matches[4]);
-            $endMinute = intval($matches[5]);
-            $endPeriod = $matches[6];
-
-            // Convert to 24-hour format
+            // Convert to 24-hour format - GERİSİ AYNI KALSIN
             if ($startPeriod === 'PM' && $startHour !== 12) $startHour += 12;
             if ($startPeriod === 'AM' && $startHour === 12) $startHour = 0;
 

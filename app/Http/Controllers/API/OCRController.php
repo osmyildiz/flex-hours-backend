@@ -50,11 +50,23 @@ class OCRController extends Controller
 
             // Save valid entries to database
             $savedEntries = [];
+            $duplicateEntries = [];
+            $skippedEntries = [];
+
             foreach ($result['entries'] as $entryData) {
                 try {
                     Log::info("Processing entry for save", ['entry' => $entryData]);
 
                     if ($this->isValidEntry($entryData)) {
+                        // Check for duplicate entries
+                        $isDuplicate = $this->checkDuplicateEntry($userId, $entryData);
+
+                        if ($isDuplicate) {
+                            $duplicateEntries[] = $entryData;
+                            Log::info("Duplicate entry skipped", ['entry' => $entryData]);
+                            continue;
+                        }
+
                         $hoursWorked = $this->calculateHoursFromTimes($entryData['start_time'], $entryData['end_time']);
 
                         $workEntry = WorkEntry::create([
@@ -71,10 +83,12 @@ class OCRController extends Controller
                         $savedEntries[] = $workEntry;
                         Log::info("Entry saved successfully", ['entry_id' => $workEntry->id]);
                     } else {
+                        $skippedEntries[] = $entryData;
                         Log::warning("Entry validation failed", ['entry' => $entryData]);
                     }
                 } catch (\Exception $e) {
                     Log::error("Failed to save entry", ['entry' => $entryData, 'error' => $e->getMessage()]);
+                    $skippedEntries[] = $entryData;
                 }
             }
 
@@ -86,10 +100,12 @@ class OCRController extends Controller
                 'data' => [
                     'parsed_entries' => $result['entries'],
                     'saved_entries' => count($savedEntries),
+                    'duplicate_entries' => count($duplicateEntries),
+                    'skipped_entries' => count($skippedEntries),
                     'entries' => $savedEntries,
                     'method' => $result['method'],
                 ],
-                'message' => count($savedEntries) . ' work entries saved successfully',
+                'message' => $this->buildSummaryMessage($savedEntries, $duplicateEntries, $skippedEntries),
             ]);
 
         } catch (\Exception $e) {
@@ -166,12 +182,15 @@ STRICT RULES:
 - total_earnings: THE MAIN DOLLAR AMOUNT shown prominently (e.g. $30, $53.50, $99, $81)
 - If you see "Base: $51.00 Tips: $48.00" format: total_earnings = base + tips (e.g. $99.00), base_pay = 51.00, tips = 48.00
 - If only one amount shown: that is total_earnings, set base_pay=null, tips=null
-- Service type: "whole_foods" if base+tips shown separately, "logistics" if just total
+- If you see "Tips pending" text: set service_type="whole_foods", base_pay=null, tips=null
+- Service type rules:
+  * "whole_foods" if base+tips shown separately OR if "Tips pending" appears anywhere
+  * "logistics" if just total amount with no base/tips breakdown
 - NEVER set total_earnings to 0.00 - it should be the main visible dollar amount
 - Include ALL visible entries in the screenshot
 - Return ONLY valid JSON, no explanation or additional text
 
-IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are the TOTAL EARNINGS, not components.'
+IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are the TOTAL EARNINGS, not components. If you see "Tips pending", this is definitely a grocery/whole_foods entry.'
                             ],
                             [
                                 'type' => 'image_url',
@@ -492,22 +511,116 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
      */
     private function determineServiceType($entry)
     {
+        // Check if base_pay and tips are both present and not null
         if (isset($entry['base_pay']) && isset($entry['tips']) &&
             $entry['base_pay'] !== null && $entry['tips'] !== null) {
             return 'whole_foods';
         }
+
+        // Check if this is explicitly marked as whole_foods (from GPT-4 Vision detecting "Tips pending")
+        if (isset($entry['service_type']) && $entry['service_type'] === 'whole_foods') {
+            return 'whole_foods';
+        }
+
+        // Default to logistics for Amazon deliveries
         return 'logistics';
     }
 
     /**
-     * Get MIME type of image
+     * Check if entry already exists for user
      */
-    private function getMimeType($imagePath)
+    private function checkDuplicateEntry($userId, $entryData)
     {
-        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-        $mimeType = finfo_file($finfo, $imagePath);
-        finfo_close($finfo);
-        return $mimeType ?: 'image/jpeg';
+        try {
+            // Parse start and end times to get precise time range
+            $startTime = $this->parseTimeToMinutes($entryData['start_time']);
+            $endTime = $this->parseTimeToMinutes($entryData['end_time']);
+
+            if ($startTime === null || $endTime === null) {
+                Log::warning("Could not parse time for duplicate check", ['entry' => $entryData]);
+                return false; // If we can't parse time, allow the entry
+            }
+
+            // Calculate hours worked for comparison
+            $hoursWorked = $this->calculateHoursFromTimes($entryData['start_time'], $entryData['end_time']);
+
+            // Check for existing entry with same date and similar time range
+            $existingEntry = WorkEntry::where('user_id', $userId)
+                ->where('date', $entryData['date'])
+                ->where('earnings', $entryData['total_earnings'])
+                ->where(function ($query) use ($hoursWorked) {
+                    // Allow small variance in hours (±0.1 hours = 6 minutes)
+                    $query->whereBetween('hours_worked', [$hoursWorked - 0.1, $hoursWorked + 0.1]);
+                })
+                ->first();
+
+            if ($existingEntry) {
+                Log::info("Duplicate entry found", [
+                    'new_entry' => $entryData,
+                    'existing_entry_id' => $existingEntry->id,
+                    'existing_date' => $existingEntry->date,
+                    'existing_hours' => $existingEntry->hours_worked,
+                    'existing_earnings' => $existingEntry->earnings
+                ]);
+                return true;
+            }
+
+            return false;
+
+        } catch (\Exception $e) {
+            Log::error("Duplicate check failed", ['error' => $e->getMessage(), 'entry' => $entryData]);
+            return false; // If check fails, allow the entry to be safe
+        }
+    }
+
+    /**
+     * Parse time string to minutes since midnight
+     */
+    private function parseTimeToMinutes($timeString)
+    {
+        try {
+            $timeFormats = ['g:i A', 'H:i', 'g:iA'];
+
+            foreach ($timeFormats as $format) {
+                try {
+                    $time = Carbon::createFromFormat($format, $timeString);
+                    return ($time->hour * 60) + $time->minute;
+                } catch (\Exception $e) {
+                    continue;
+                }
+            }
+
+            return null;
+        } catch (\Exception $e) {
+            Log::error("Time parsing failed", ['time' => $timeString, 'error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    /**
+     * Build summary message for response
+     */
+    private function buildSummaryMessage($savedEntries, $duplicateEntries, $skippedEntries)
+    {
+        $messages = [];
+
+        if (count($savedEntries) > 0) {
+            $messages[] = count($savedEntries) . ' new entries saved';
+        }
+
+        if (count($duplicateEntries) > 0) {
+            $messages[] = count($duplicateEntries) . ' duplicates skipped';
+        }
+
+        if (count($skippedEntries) > 0) {
+            $messages[] = count($skippedEntries) . ' invalid entries skipped';
+        }
+
+        if (empty($messages)) {
+            return 'No entries processed';
+        }
+
+        return implode(', ', $messages);
     }
 
     /**
@@ -608,23 +721,14 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
         return null;
     }
 
-    private function parseTimeRange($timeRange)
+    /**
+     * Get MIME type of image
+     */
+    private function getMimeType($imagePath)
     {
-        $patterns = [
-            '/(\d{1,2}):(\d{2})\s+(AM|PM)\s*[-–]\s*(\d{1,2}):(\d{2})\s+(AM|PM)/i',
-        ];
-
-        foreach ($patterns as $pattern) {
-            if (preg_match($pattern, $timeRange, $matches)) {
-                $startTime = $matches[1] . ':' . $matches[2] . ' ' . strtoupper($matches[3]);
-                $endTime = $matches[4] . ':' . $matches[5] . ' ' . strtoupper($matches[6]);
-
-                return [
-                    'start' => $startTime,
-                    'end' => $endTime
-                ];
-            }
-        }
-        return null;
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $mimeType = finfo_file($finfo, $imagePath);
+        finfo_close($finfo);
+        return $mimeType ?: 'image/jpeg';
     }
 }

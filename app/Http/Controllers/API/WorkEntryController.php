@@ -11,6 +11,23 @@ use Carbon\Carbon;
 
 class WorkEntryController extends Controller
 {
+    /**
+     * Get user's timezone from request or default to UTC
+     */
+    private function getUserTimezone(Request $request): string
+    {
+        return $request->header('X-User-Timezone', 'UTC');
+    }
+
+    /**
+     * Get "today" date in user's timezone
+     */
+    private function getUserToday(Request $request): string
+    {
+        $userTimezone = $this->getUserTimezone($request);
+        return Carbon::now($userTimezone)->format('Y-m-d');
+    }
+
     public function index(): JsonResponse
     {
         $entries = Auth::user()->workEntries()
@@ -48,7 +65,6 @@ class WorkEntryController extends Controller
 
     public function show(WorkEntry $workEntry): JsonResponse
     {
-        // Check if entry belongs to authenticated user
         if ($workEntry->user_id !== Auth::id()) {
             return response()->json([
                 'success' => false,
@@ -64,7 +80,6 @@ class WorkEntryController extends Controller
 
     public function update(Request $request, WorkEntry $workEntry): JsonResponse
     {
-        // Check if entry belongs to authenticated user
         if ($workEntry->user_id !== Auth::id()) {
             return response()->json([
                 'success' => false,
@@ -95,7 +110,6 @@ class WorkEntryController extends Controller
 
     public function destroy(WorkEntry $workEntry): JsonResponse
     {
-        // Check if entry belongs to authenticated user
         if ($workEntry->user_id !== Auth::id()) {
             return response()->json([
                 'success' => false,
@@ -111,16 +125,16 @@ class WorkEntryController extends Controller
         ]);
     }
 
-    public function weeklyStats(): JsonResponse
+    public function weeklyStats(Request $request): JsonResponse
     {
-        $user = Auth::user();
-        $userTimezone = $user->timezone ?? 'UTC';
+        $userId = Auth::id();
+        $userTimezone = $this->getUserTimezone($request);
         $now = Carbon::now($userTimezone);
-        $userId = $user->id;
+        $today = $now->format('Y-m-d');
 
-        // ROLLING 7-DAY WINDOW (bugün dahil, 7 gün geriye)
-        $startDate = $now->copy()->subDays(6)->toDateString(); // 6 gün önce + bugün = 7 gün
-        $endDate = $now->toDateString();
+        // ROLLING 7-DAY WINDOW (today included, 7 days back)
+        $startDate = $now->copy()->subDays(6)->format('Y-m-d'); // 6 days ago + today = 7 days
+        $endDate = $today;
 
         $entries = WorkEntry::where('user_id', $userId)
             ->whereBetween('date', [$startDate, $endDate])
@@ -130,8 +144,7 @@ class WorkEntryController extends Controller
         $totalHours = $entries->sum('hours_worked');
         $totalEarnings = $entries->sum('earnings');
 
-        // Today entries (direct from database)
-        $today = $now->toDateString();
+        // Today entries (in user's timezone)
         $todayEntries = WorkEntry::where('user_id', $userId)
             ->where('date', $today)
             ->get();
@@ -143,26 +156,24 @@ class WorkEntryController extends Controller
         $dailyLimit = 8.0;
 
         // TODAY AVAILABLE CALCULATION
-        // Basit: Günlük limitten bugün çalışılan saati çıkar
         $todayAvailable = max(0, $dailyLimit - $todayHours);
 
         // TOMORROW AVAILABLE CALCULATION
-        // Yarın düşecek olan entry (7 gün önceki yarın = bugünden 6 gün önce)
-        $tomorrowDropDate = $now->copy()->addDay()->subDays(6)->toDateString();
+        $tomorrowDropDate = $now->copy()->addDay()->subDays(6)->format('Y-m-d');
         $tomorrowDropHours = WorkEntry::where('user_id', $userId)
             ->where('date', $tomorrowDropDate)
             ->sum('hours_worked');
 
-        // Yarın için projected weekly hours
         $tomorrowProjectedWeekly = $totalHours - $tomorrowDropHours;
         $tomorrowWeeklyAvailable = max(0, $weeklyLimit - $tomorrowProjectedWeekly);
         $tomorrowAvailable = min($dailyLimit, $tomorrowWeeklyAvailable);
-        // Recent activity (sadece bugünkü entries)
+
+        // Recent activity (only today's entries in user timezone)
         $todayRecentEntries = WorkEntry::where('user_id', $userId)
             ->where('date', $today)
             ->orderBy('created_at', 'desc')
             ->get()
-            ->map(function ($entry) {
+            ->map(function ($entry) use ($userTimezone) {
                 return [
                     'id' => $entry->id,
                     'date' => $entry->date,
@@ -171,7 +182,7 @@ class WorkEntryController extends Controller
                     'base_pay' => $entry->base_pay ? round($entry->base_pay, 2) : null,
                     'tips' => $entry->tips ? round($entry->tips, 2) : null,
                     'service_type' => $entry->service_type,
-                    'created_at' => $entry->created_at->format('g:i A')
+                    'created_at' => Carbon::parse($entry->created_at)->setTimezone($userTimezone)->format('g:i A')
                 ];
             });
 
@@ -199,6 +210,8 @@ class WorkEntryController extends Controller
                 'tomorrow' => [
                     'available_hours' => round($tomorrowAvailable, 2),
                     'debug' => [
+                        'user_timezone' => $userTimezone,
+                        'user_today' => $today,
                         'current_weekly' => round($totalHours, 2),
                         'tomorrow_drop_date' => $tomorrowDropDate,
                         'tomorrow_drop_hours' => round($tomorrowDropHours, 2),
@@ -210,12 +223,14 @@ class WorkEntryController extends Controller
             ]
         ]);
     }
+
     public function stats(Request $request): JsonResponse
     {
         $period = $request->get('period', '30d');
         $userId = auth()->id();
+        $userTimezone = $this->getUserTimezone($request);
 
-        // Period'a göre gün sayısı
+        // Period based on user timezone
         switch($period) {
             case '7d':
                 $days = 7;
@@ -230,9 +245,8 @@ class WorkEntryController extends Controller
                 $days = 30;
         }
 
-        $startDate = Carbon::now()->subDays($days);
+        $startDate = Carbon::now($userTimezone)->subDays($days)->format('Y-m-d');
 
-        // Entries al
         $entries = WorkEntry::where('user_id', $userId)
             ->where('date', '>=', $startDate)
             ->orderBy('date', 'desc')
@@ -242,12 +256,15 @@ class WorkEntryController extends Controller
             'success' => true,
             'data' => [
                 'period' => $period,
+                'user_timezone' => $userTimezone,
+                'start_date' => $startDate,
                 'total_entries' => $entries->count(),
                 'total_earnings' => $entries->sum('earnings'),
                 'total_hours' => $entries->sum('hours_worked'),
             ]
         ]);
     }
+
     public function getAvailableYears(Request $request): JsonResponse
     {
         $userId = auth()->id();
@@ -258,9 +275,9 @@ class WorkEntryController extends Controller
             ->pluck('year')
             ->toArray();
 
-        // If no entries, return current year
         if (empty($years)) {
-            $years = [date('Y')];
+            $userTimezone = $this->getUserTimezone($request);
+            $years = [Carbon::now($userTimezone)->year];
         }
 
         return response()->json([
@@ -269,9 +286,6 @@ class WorkEntryController extends Controller
         ]);
     }
 
-    /**
-     * Get monthly summary data for a specific year
-     */
     public function getMonthlyData(Request $request, $year): JsonResponse
     {
         $userId = auth()->id();
@@ -281,7 +295,6 @@ class WorkEntryController extends Controller
             ->orderBy('date', 'desc')
             ->get();
 
-        // Group by month
         $monthlyData = [];
 
         for ($month = 1; $month <= 12; $month++) {
@@ -318,9 +331,6 @@ class WorkEntryController extends Controller
         ]);
     }
 
-    /**
-     * Get daily entries for a specific month
-     */
     public function getDailyEntries(Request $request, $year, $month): JsonResponse
     {
         $request->validate([
@@ -331,6 +341,7 @@ class WorkEntryController extends Controller
         $userId = auth()->id();
         $perPage = $request->get('per_page', 30);
         $page = $request->get('page', 1);
+        $userTimezone = $this->getUserTimezone($request);
 
         $entries = WorkEntry::where('user_id', $userId)
             ->whereYear('date', $year)
@@ -338,12 +349,11 @@ class WorkEntryController extends Controller
             ->orderBy('date', 'desc')
             ->get();
 
-        // Group entries by date
         $groupedEntries = $entries->groupBy(function ($entry) {
             return Carbon::parse($entry->date)->format('Y-m-d');
         });
 
-        $formattedGroups = $groupedEntries->map(function ($dateEntries, $date) {
+        $formattedGroups = $groupedEntries->map(function ($dateEntries, $date) use ($userTimezone) {
             return [
                 'date' => $date,
                 'formatted_date' => Carbon::parse($date)->format('M j, Y'),
@@ -351,7 +361,7 @@ class WorkEntryController extends Controller
                 'total_earnings' => round($dateEntries->sum('earnings'), 2),
                 'total_hours' => round($dateEntries->sum('hours_worked'), 2),
                 'entry_count' => $dateEntries->count(),
-                'entries' => $dateEntries->map(function ($entry) {
+                'entries' => $dateEntries->map(function ($entry) use ($userTimezone) {
                     return [
                         'id' => $entry->id,
                         'hours_worked' => $entry->hours_worked,
@@ -359,13 +369,12 @@ class WorkEntryController extends Controller
                         'base_pay' => $entry->base_pay ?? 0,
                         'tips' => $entry->tips ?? 0,
                         'notes' => $entry->notes ?? '',
-                        'created_at' => $entry->created_at,
+                        'created_at' => Carbon::parse($entry->created_at)->setTimezone($userTimezone),
                     ];
                 }),
             ];
         })->values();
 
-        // Simple pagination
         $total = $formattedGroups->count();
         $offset = ($page - 1) * $perPage;
         $paginatedGroups = $formattedGroups->slice($offset, $perPage)->values();
@@ -392,9 +401,6 @@ class WorkEntryController extends Controller
         ]);
     }
 
-    /**
-     * Search entries with flexible filters
-     */
     public function searchEntries(Request $request): JsonResponse
     {
         $request->validate([
@@ -413,30 +419,24 @@ class WorkEntryController extends Controller
 
         $query = WorkEntry::where('user_id', $userId);
 
-        // Date range filters
         if ($request->start_date) {
             $query->where('date', '>=', $request->start_date);
         }
         if ($request->end_date) {
             $query->where('date', '<=', $request->end_date);
         }
-
-        // Earnings range
         if ($request->min_earnings) {
             $query->where('earnings', '>=', $request->min_earnings);
         }
         if ($request->max_earnings) {
             $query->where('earnings', '<=', $request->max_earnings);
         }
-
-        // Text search in notes
         if ($request->search) {
             $query->where('notes', 'LIKE', '%' . $request->search . '%');
         }
 
         $entries = $query->orderBy('date', 'desc')->get();
 
-        // Simple pagination
         $total = $entries->count();
         $offset = ($page - 1) * $perPage;
         $paginatedEntries = $entries->slice($offset, $perPage)->values();
@@ -466,5 +466,4 @@ class WorkEntryController extends Controller
             ],
         ]);
     }
-
 }

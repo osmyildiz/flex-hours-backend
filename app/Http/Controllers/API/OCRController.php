@@ -91,18 +91,23 @@ class OCRController extends Controller
      */
     private function extractTextFromImage($imagePath)
     {
-        Log::info("Starting OCR extraction", ['path' => $imagePath]);
+        try {
+            Log::info("Starting OCR extraction", ['path' => $imagePath]);
 
-        $command = "tesseract '$imagePath' stdout 2>&1";
-        $output = shell_exec($command);
+            $command = "tesseract '$imagePath' stdout 2>&1";
+            $output = shell_exec($command);
 
-        Log::info("Tesseract output", ['output' => $output]);
+            Log::info("Tesseract output", ['output' => $output]);
 
-        if ($output === null || trim($output) === '') {
-            throw new \Exception('Tesseract OCR failed to process image');
+            if ($output === null || trim($output) === '') {
+                throw new \Exception('Tesseract OCR failed to process image');
+            }
+
+            return trim($output);
+        } catch (\Exception $e) {
+            Log::error("extractTextFromImage failed", ['error' => $e->getMessage()]);
+            throw $e;
         }
-
-        return trim($output);
     }
 
     /**
@@ -110,22 +115,40 @@ class OCRController extends Controller
      */
     private function parseAmazonFlexEarnings($ocrText)
     {
-        $entries = [];
-        $lines = array_filter(array_map('trim', explode("\n", $ocrText)));
+        try {
+            Log::info("OCR text received", ['text' => $ocrText]);
 
-        for ($i = 0; $i < count($lines); $i++) {
-            $line = $lines[$i];
+            $entries = [];
+            $lines = array_filter(array_map('trim', explode("\n", $ocrText)));
 
-            // Look for date patterns: "Thu, Sep 18", "Mon, Sep 15"
-            if ($this->isDateLine($line)) {
-                $entry = $this->parseEntry($lines, $i);
-                if ($entry) {
-                    $entries[] = $entry;
+            Log::info("Lines parsed", ['count' => count($lines), 'lines' => $lines]);
+
+            for ($i = 0; $i < count($lines); $i++) {
+                $line = $lines[$i];
+
+                try {
+                    if ($this->isDateLine($line)) {
+                        Log::info("Processing date line", ['line' => $line, 'index' => $i]);
+                        $entry = $this->parseEntry($lines, $i);
+                        if ($entry) {
+                            $entries[] = $entry;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error("Error parsing line", [
+                        'line' => $line,
+                        'index' => $i,
+                        'error' => $e->getMessage()
+                    ]);
+                    continue; // Skip problematic line
                 }
             }
-        }
 
-        return $entries;
+            return $entries;
+        } catch (\Exception $e) {
+            Log::error("parseAmazonFlexEarnings failed", ['error' => $e->getMessage()]);
+            return [];
+        }
     }
 
     /**
@@ -133,8 +156,13 @@ class OCRController extends Controller
      */
     private function isDateLine($line)
     {
-        $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}$/';
-        return preg_match($pattern, $line);
+        try {
+            $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}$/';
+            return preg_match($pattern, $line);
+        } catch (\Exception $e) {
+            Log::error("isDateLine failed", ['line' => $line, 'error' => $e->getMessage()]);
+            return false;
+        }
     }
 
     /**
@@ -142,72 +170,77 @@ class OCRController extends Controller
      */
     private function parseEntry($lines, $startIndex)
     {
-        if ($startIndex >= count($lines)) return null;
+        try {
+            if ($startIndex >= count($lines)) return null;
 
-        $dateLine = $lines[$startIndex];
-        $timeLine = null;
-        $totalEarnings = null;
-        $basePay = null;
-        $tips = null;
+            $dateLine = $lines[$startIndex];
+            $timeLine = null;
+            $totalEarnings = null;
+            $basePay = null;
+            $tips = null;
 
-        // Look for related data in next few lines
-        for ($i = $startIndex + 1; $i < count($lines) && $i < $startIndex + 6; $i++) {
-            if ($i >= count($lines)) break;
+            // Look for related data in next few lines
+            for ($i = $startIndex + 1; $i < count($lines) && $i < $startIndex + 6; $i++) {
+                if ($i >= count($lines)) break;
 
-            $line = $lines[$i];
+                $line = $lines[$i];
 
-            // Check for time pattern: "9:21 AM - 10:30 AM"
-            if ($this->isTimeLine($line)) {
-                $timeLine = $line;
-            }
-
-            // Check for total earnings: "$30", "$53.50"
-            if ($this->isEarningsLine($line)) {
-                $totalEarnings = $this->parseEarnings($line);
-            }
-
-            // Check for base/tips: "Base: $51 Tips: $48"
-            if (strpos($line, 'Base:') !== false && strpos($line, 'Tips:') !== false) {
-                if (preg_match('/Base:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
-                    $basePay = floatval($matches[1]);
+                // Check for time pattern: "9:21 AM - 10:30 AM"
+                if ($this->isTimeLine($line)) {
+                    $timeLine = $line;
                 }
-                if (preg_match('/Tips:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
-                    $tips = floatval($matches[1]);
+
+                // Check for total earnings: "$30", "$53.50"
+                if ($this->isEarningsLine($line)) {
+                    $totalEarnings = $this->parseEarnings($line);
+                }
+
+                // Check for base/tips: "Base: $51 Tips: $48"
+                if (strpos($line, 'Base:') !== false && strpos($line, 'Tips:') !== false) {
+                    if (preg_match('/Base:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
+                        $basePay = isset($matches[1]) ? floatval($matches[1]) : null;
+                    }
+                    if (preg_match('/Tips:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
+                        $tips = isset($matches[1]) ? floatval($matches[1]) : null;
+                    }
+                }
+
+                // Stop if we hit another date
+                if ($this->isDateLine($line) && $i > $startIndex) {
+                    break;
                 }
             }
 
-            // Stop if we hit another date
-            if ($this->isDateLine($line) && $i > $startIndex) {
-                break;
+            // Validate entry
+            if (!$timeLine || $totalEarnings === null) {
+                return null;
             }
-        }
 
-        // Validate entry
-        if (!$timeLine || $totalEarnings === null) {
+            // Parse date
+            $parsedDate = $this->parseDate($dateLine);
+            if (!$parsedDate) return null;
+
+            // Calculate hours
+            $hoursWorked = $this->calculateHours($timeLine);
+
+            // Determine service type
+            $serviceType = ($basePay !== null && $tips !== null) ? 'whole_foods' : 'logistics';
+
+            return [
+                'date' => $parsedDate->format('Y-m-d'),
+                'time_range' => $timeLine,
+                'hours_worked' => $hoursWorked,
+                'earnings' => $totalEarnings,
+                'base_pay' => $basePay,
+                'tips' => $tips,
+                'service_type' => $serviceType,
+                'original_text' => $dateLine . ' ' . $timeLine,
+                'is_valid' => $totalEarnings > 0 && $hoursWorked > 0,
+            ];
+        } catch (\Exception $e) {
+            Log::error("parseEntry failed", ['error' => $e->getMessage()]);
             return null;
         }
-
-        // Parse date
-        $parsedDate = $this->parseDate($dateLine);
-        if (!$parsedDate) return null;
-
-        // Calculate hours
-        $hoursWorked = $this->calculateHours($timeLine);
-
-        // Determine service type
-        $serviceType = ($basePay !== null && $tips !== null) ? 'whole_foods' : 'logistics';
-
-        return [
-            'date' => $parsedDate->format('Y-m-d'),
-            'time_range' => $timeLine,
-            'hours_worked' => $hoursWorked,
-            'earnings' => $totalEarnings,
-            'base_pay' => $basePay,
-            'tips' => $tips,
-            'service_type' => $serviceType,
-            'original_text' => $dateLine . ' ' . $timeLine,
-            'is_valid' => $totalEarnings > 0 && $hoursWorked > 0,
-        ];
     }
 
     /**
@@ -215,8 +248,13 @@ class OCRController extends Controller
      */
     private function isTimeLine($line)
     {
-        $pattern = '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/';
-        return preg_match($pattern, $line);
+        try {
+            $pattern = '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/';
+            return preg_match($pattern, $line);
+        } catch (\Exception $e) {
+            Log::error("isTimeLine failed", ['line' => $line, 'error' => $e->getMessage()]);
+            return false;
+        }
     }
 
     /**
@@ -224,8 +262,13 @@ class OCRController extends Controller
      */
     private function isEarningsLine($line)
     {
-        $pattern = '/^\$\d+(?:\.\d{2})?$/';
-        return preg_match($pattern, $line);
+        try {
+            $pattern = '/^\$\d+(?:\.\d{2})?$/';
+            return preg_match($pattern, $line);
+        } catch (\Exception $e) {
+            Log::error("isEarningsLine failed", ['line' => $line, 'error' => $e->getMessage()]);
+            return false;
+        }
     }
 
     /**
@@ -233,93 +276,101 @@ class OCRController extends Controller
      */
     private function parseEarnings($line)
     {
-        if (preg_match('/\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
-            return floatval($matches[1]);
+        try {
+            if (preg_match('/\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
+                return isset($matches[1]) ? floatval($matches[1]) : null;
+            }
+            return null;
+        } catch (\Exception $e) {
+            Log::error("parseEarnings failed", ['line' => $line, 'error' => $e->getMessage()]);
+            return null;
         }
-        return null;
     }
 
     /**
      * Parse date from Amazon Flex format
      */
-    // parseDate method'unu güncelle
-    // OCRController.php'de tüm array access'leri güvenli hale getir:
-
     private function parseDate($dateLine)
     {
-        Log::info("Parsing date line: " . $dateLine);
+        try {
+            Log::info("Parsing date line: " . $dateLine);
 
-        $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/';
+            $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/';
 
-        if (preg_match($pattern, $dateLine, $matches)) {
-            Log::info("Date matches", ['matches' => $matches]);
+            if (preg_match($pattern, $dateLine, $matches)) {
+                Log::info("Date matches", ['matches' => $matches]);
 
-            // Safe array access
-            $monthName = $matches[2] ?? null;
-            $day = isset($matches[3]) ? intval($matches[3]) : null;
+                // Safe array access
+                $monthName = $matches[2] ?? null;
+                $day = isset($matches[3]) ? intval($matches[3]) : null;
 
-            if (!$monthName || !$day) {
-                Log::error("Invalid date parts", ['month' => $monthName, 'day' => $day]);
-                return null;
+                if (!$monthName || !$day) {
+                    Log::error("Invalid date parts", ['month' => $monthName, 'day' => $day]);
+                    return null;
+                }
+
+                $months = [
+                    'Jan' => 1, 'Feb' => 2, 'Mar' => 3, 'Apr' => 4,
+                    'May' => 5, 'Jun' => 6, 'Jul' => 7, 'Aug' => 8,
+                    'Sep' => 9, 'Oct' => 10, 'Nov' => 11, 'Dec' => 12,
+                ];
+
+                $month = $months[$monthName] ?? 1;
+                $year = date('Y');
+
+                return Carbon::createFromDate($year, $month, $day);
             }
 
-            $months = [
-                'Jan' => 1, 'Feb' => 2, 'Mar' => 3, 'Apr' => 4,
-                'May' => 5, 'Jun' => 6, 'Jul' => 7, 'Aug' => 8,
-                'Sep' => 9, 'Oct' => 10, 'Nov' => 11, 'Dec' => 12,
-            ];
-
-            $month = $months[$monthName] ?? 1;
-            $year = date('Y');
-
-            return Carbon::createFromDate($year, $month, $day);
+            Log::info("Date pattern did not match");
+            return null;
+        } catch (\Exception $e) {
+            Log::error("parseDate failed", ['dateLine' => $dateLine, 'error' => $e->getMessage()]);
+            return null;
         }
-
-        Log::info("Date pattern did not match");
-        return null;
     }
-
-
-
 
     /**
      * Calculate hours from time range
      */
-    // Mevcut method'u bulup sadece bu kısmı değiştir:
     private function calculateHours($timeRange)
     {
-        $pattern = '/^(\d{1,2}):(\d{2})\s+(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s+(AM|PM)$/';
+        try {
+            $pattern = '/^(\d{1,2}):(\d{2})\s+(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s+(AM|PM)$/';
 
-        if (preg_match($pattern, $timeRange, $matches)) {
-            // Safe array access - SADECE BU SATIRLARI DEĞİŞTİR
-            $startHour = isset($matches[1]) ? intval($matches[1]) : 0;
-            $startMinute = isset($matches[2]) ? intval($matches[2]) : 0;
-            $startPeriod = $matches[3] ?? 'AM';
+            if (preg_match($pattern, $timeRange, $matches)) {
+                // Safe array access
+                $startHour = isset($matches[1]) ? intval($matches[1]) : 0;
+                $startMinute = isset($matches[2]) ? intval($matches[2]) : 0;
+                $startPeriod = $matches[3] ?? 'AM';
 
-            $endHour = isset($matches[4]) ? intval($matches[4]) : 0;
-            $endMinute = isset($matches[5]) ? intval($matches[5]) : 0;
-            $endPeriod = $matches[6] ?? 'AM';
+                $endHour = isset($matches[4]) ? intval($matches[4]) : 0;
+                $endMinute = isset($matches[5]) ? intval($matches[5]) : 0;
+                $endPeriod = $matches[6] ?? 'AM';
 
-            // Convert to 24-hour format - GERİSİ AYNI KALSIN
-            if ($startPeriod === 'PM' && $startHour !== 12) $startHour += 12;
-            if ($startPeriod === 'AM' && $startHour === 12) $startHour = 0;
+                // Convert to 24-hour format
+                if ($startPeriod === 'PM' && $startHour !== 12) $startHour += 12;
+                if ($startPeriod === 'AM' && $startHour === 12) $startHour = 0;
 
-            if ($endPeriod === 'PM' && $endHour !== 12) $endHour += 12;
-            if ($endPeriod === 'AM' && $endHour === 12) $endHour = 0;
+                if ($endPeriod === 'PM' && $endHour !== 12) $endHour += 12;
+                if ($endPeriod === 'AM' && $endHour === 12) $endHour = 0;
 
-            // Calculate duration in minutes
-            $startMinutes = ($startHour * 60) + $startMinute;
-            $endMinutes = ($endHour * 60) + $endMinute;
+                // Calculate duration in minutes
+                $startMinutes = ($startHour * 60) + $startMinute;
+                $endMinutes = ($endHour * 60) + $endMinute;
 
-            // Handle overnight shifts
-            if ($endMinutes < $startMinutes) {
-                $endMinutes += (24 * 60);
+                // Handle overnight shifts
+                if ($endMinutes < $startMinutes) {
+                    $endMinutes += (24 * 60);
+                }
+
+                $durationMinutes = $endMinutes - $startMinutes;
+                return round($durationMinutes / 60, 2);
             }
 
-            $durationMinutes = $endMinutes - $startMinutes;
-            return round($durationMinutes / 60, 2);
+            return 2.0; // Fallback
+        } catch (\Exception $e) {
+            Log::error("calculateHours failed", ['timeRange' => $timeRange, 'error' => $e->getMessage()]);
+            return 2.0;
         }
-
-        return 2.0; // Fallback
     }
 }

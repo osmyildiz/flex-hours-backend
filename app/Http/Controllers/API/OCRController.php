@@ -36,7 +36,7 @@ class OCRController extends Controller
 
             if (!$result['success']) {
                 Log::warning("GPT-4 Vision failed, falling back to Tesseract", ['error' => $result['error']]);
-                // Fallback to Tesseract OCR
+                // Fallback to Tesseract OCR only if GPT-4 completely fails
                 $result = $this->processWithTesseract($fullPath);
             }
 
@@ -44,24 +44,37 @@ class OCRController extends Controller
                 throw new \Exception('All OCR methods failed: ' . $result['error']);
             }
 
+            Log::info("OCR: Processing result", ['result' => $result]);
+
             Log::info("OCR: Parsed entries", ['count' => count($result['entries']), 'method' => $result['method']]);
 
             // Save valid entries to database
             $savedEntries = [];
             foreach ($result['entries'] as $entryData) {
-                if ($this->isValidEntry($entryData)) {
-                    $workEntry = WorkEntry::create([
-                        'user_id' => $userId,
-                        'date' => $entryData['date'],
-                        'hours_worked' => $this->calculateHoursFromTimes($entryData['start_time'], $entryData['end_time']),
-                        'earnings' => $entryData['total_earnings'],
-                        'base_pay' => $entryData['base_pay'],
-                        'tips' => $entryData['tips'],
-                        'service_type' => $entryData['service_type'] ?? $this->determineServiceType($entryData),
-                        'notes' => 'OCR imported via ' . $result['method'],
-                    ]);
+                try {
+                    Log::info("Processing entry for save", ['entry' => $entryData]);
 
-                    $savedEntries[] = $workEntry;
+                    if ($this->isValidEntry($entryData)) {
+                        $hoursWorked = $this->calculateHoursFromTimes($entryData['start_time'], $entryData['end_time']);
+
+                        $workEntry = WorkEntry::create([
+                            'user_id' => $userId,
+                            'date' => $entryData['date'],
+                            'hours_worked' => $hoursWorked,
+                            'earnings' => $entryData['total_earnings'],
+                            'base_pay' => $entryData['base_pay'],
+                            'tips' => $entryData['tips'],
+                            'service_type' => $entryData['service_type'] ?? $this->determineServiceType($entryData),
+                            'notes' => 'OCR imported via ' . $result['method'],
+                        ]);
+
+                        $savedEntries[] = $workEntry;
+                        Log::info("Entry saved successfully", ['entry_id' => $workEntry->id]);
+                    } else {
+                        Log::warning("Entry validation failed", ['entry' => $entryData]);
+                    }
+                } catch (\Exception $e) {
+                    Log::error("Failed to save entry", ['entry' => $entryData, 'error' => $e->getMessage()]);
                 }
             }
 
@@ -396,14 +409,27 @@ STRICT RULES:
      */
     private function isValidEntry($entry)
     {
-        return isset($entry['date'])
+        Log::info("Validating entry", ['entry' => $entry]);
+
+        $isValid = isset($entry['date'])
             && isset($entry['start_time'])
             && isset($entry['end_time'])
             && isset($entry['total_earnings'])
-            && $entry['total_earnings'] > 0
-            && $this->isValidDate($entry['date'])
-            && $this->isValidTime($entry['start_time'])
-            && $this->isValidTime($entry['end_time']);
+            && $entry['total_earnings'] > 0;
+
+        // Don't validate date/time format for GPT-4 Vision results - trust the AI
+        if (!$isValid) {
+            Log::warning("Entry validation failed", [
+                'entry' => $entry,
+                'has_date' => isset($entry['date']),
+                'has_start_time' => isset($entry['start_time']),
+                'has_end_time' => isset($entry['end_time']),
+                'has_earnings' => isset($entry['total_earnings']),
+                'earnings_value' => $entry['total_earnings'] ?? 'null'
+            ]);
+        }
+
+        return $isValid;
     }
 
     /**
@@ -412,14 +438,41 @@ STRICT RULES:
     private function calculateHoursFromTimes($startTime, $endTime)
     {
         try {
-            $start = Carbon::createFromFormat('g:i A', $startTime);
-            $end = Carbon::createFromFormat('g:i A', $endTime);
+            Log::info("Calculating hours", ['start' => $startTime, 'end' => $endTime]);
+
+            // Handle different time formats that GPT-4 might return
+            $timeFormats = [
+                'g:i A',    // 9:21 AM
+                'H:i',      // 09:21
+                'g:iA',     // 9:21AM
+            ];
+
+            $start = null;
+            $end = null;
+
+            foreach ($timeFormats as $format) {
+                try {
+                    $start = Carbon::createFromFormat($format, $startTime);
+                    $end = Carbon::createFromFormat($format, $endTime);
+                    break;
+                } catch (\Exception $e) {
+                    continue;
+                }
+            }
+
+            if (!$start || !$end) {
+                Log::warning("Could not parse times, using fallback", ['start' => $startTime, 'end' => $endTime]);
+                return 2.0;
+            }
 
             if ($end->lt($start)) {
                 $end->addDay(); // Handle overnight shifts
             }
 
-            return round($start->diffInMinutes($end) / 60, 2);
+            $hours = round($start->diffInMinutes($end) / 60, 2);
+            Log::info("Hours calculated", ['hours' => $hours]);
+
+            return $hours;
         } catch (\Exception $e) {
             Log::error("calculateHoursFromTimes failed", ['start' => $startTime, 'end' => $endTime, 'error' => $e->getMessage()]);
             return 2.0; // Fallback

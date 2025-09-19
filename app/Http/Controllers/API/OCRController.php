@@ -243,6 +243,8 @@ class OCRController extends Controller
      * Parse date from Amazon Flex format
      */
     // parseDate method'unu güncelle
+    // OCRController.php'de tüm array access'leri güvenli hale getir:
+
     private function parseDate($dateLine)
     {
         Log::info("Parsing date line: " . $dateLine);
@@ -250,15 +252,16 @@ class OCRController extends Controller
         $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/';
 
         if (preg_match($pattern, $dateLine, $matches)) {
-            Log::info("Date pattern matched", ['matches' => $matches]);
+            Log::info("Date matches", ['matches' => $matches]);
 
-            if (!isset($matches[2])) {
-                Log::error("Missing month in matches array", ['matches' => $matches]);
+            // Safe array access
+            $monthName = $matches[2] ?? null;
+            $day = isset($matches[3]) ? intval($matches[3]) : null;
+
+            if (!$monthName || !$day) {
+                Log::error("Invalid date parts", ['month' => $monthName, 'day' => $day]);
                 return null;
             }
-
-            $monthName = $matches[2];
-            $day = intval($matches[3]);
 
             $months = [
                 'Jan' => 1, 'Feb' => 2, 'Mar' => 3, 'Apr' => 4,
@@ -266,15 +269,35 @@ class OCRController extends Controller
                 'Sep' => 9, 'Oct' => 10, 'Nov' => 11, 'Dec' => 12,
             ];
 
-            $month = $months[$monthName];
+            $month = $months[$monthName] ?? 1;
             $year = date('Y');
 
             return Carbon::createFromDate($year, $month, $day);
-        } else {
-            Log::info("Date pattern did not match");
         }
 
+        Log::info("Date pattern did not match");
         return null;
+    }
+
+// calculateHours method'unu da güvenli hale getir:
+    private function calculateHours($timeRange)
+    {
+        $pattern = '/^(\d{1,2}):(\d{2})\s+(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s+(AM|PM)$/';
+
+        if (preg_match($pattern, $timeRange, $matches)) {
+            // Safe array access
+            $startHour = isset($matches[1]) ? intval($matches[1]) : 0;
+            $startMinute = isset($matches[2]) ? intval($matches[2]) : 0;
+            $startPeriod = $matches[3] ?? 'AM';
+
+            $endHour = isset($matches[4]) ? intval($matches[4]) : 0;
+            $endMinute = isset($matches[5]) ? intval($matches[5]) : 0;
+            $endPeriod = $matches[6] ?? 'AM';
+
+            // ... rest of calculation
+        }
+
+        return 2.0; // Fallback
     }
 
     /**

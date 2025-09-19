@@ -163,12 +163,15 @@ Return ONLY a JSON object with this exact structure:
 STRICT RULES:
 - Date format: YYYY-MM-DD (assume current year 2024)
 - Time format: "H:MM AM/PM" (exact format with space)
-- If "Tips pending" or only total shown: set base_pay=null, tips=null
-- If separate Base and Tips shown: include both as numbers
+- total_earnings: THE MAIN DOLLAR AMOUNT shown prominently (e.g. $30, $53.50, $99, $81)
+- If you see "Base: $51.00 Tips: $48.00" format: total_earnings = base + tips (e.g. $99.00), base_pay = 51.00, tips = 48.00
+- If only one amount shown: that is total_earnings, set base_pay=null, tips=null
 - Service type: "whole_foods" if base+tips shown separately, "logistics" if just total
+- NEVER set total_earnings to 0.00 - it should be the main visible dollar amount
 - Include ALL visible entries in the screenshot
 - Return ONLY valid JSON, no explanation or additional text
-- Parse ALL entries you can see, even if partially visible'
+
+IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are the TOTAL EARNINGS, not components.'
                             ],
                             [
                                 'type' => 'image_url',
@@ -411,13 +414,15 @@ STRICT RULES:
     {
         Log::info("Validating entry", ['entry' => $entry]);
 
-        $isValid = isset($entry['date'])
+        $hasRequiredFields = isset($entry['date'])
             && isset($entry['start_time'])
             && isset($entry['end_time'])
-            && isset($entry['total_earnings'])
-            && $entry['total_earnings'] > 0;
+            && isset($entry['total_earnings']);
 
-        // Don't validate date/time format for GPT-4 Vision results - trust the AI
+        $hasValidEarnings = isset($entry['total_earnings']) && $entry['total_earnings'] > 0;
+
+        $isValid = $hasRequiredFields && $hasValidEarnings;
+
         if (!$isValid) {
             Log::warning("Entry validation failed", [
                 'entry' => $entry,
@@ -425,8 +430,11 @@ STRICT RULES:
                 'has_start_time' => isset($entry['start_time']),
                 'has_end_time' => isset($entry['end_time']),
                 'has_earnings' => isset($entry['total_earnings']),
-                'earnings_value' => $entry['total_earnings'] ?? 'null'
+                'earnings_value' => $entry['total_earnings'] ?? 'null',
+                'earnings_positive' => isset($entry['total_earnings']) ? ($entry['total_earnings'] > 0) : false
             ]);
+        } else {
+            Log::info("Entry validation passed", ['entry' => $entry]);
         }
 
         return $isValid;

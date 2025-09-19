@@ -91,11 +91,14 @@ class OCRController extends Controller
      */
     private function extractTextFromImage($imagePath)
     {
-        // Install tesseract on Ubuntu: sudo apt install tesseract-ocr
-        $command = "tesseract '$imagePath' stdout 2>/dev/null";
+        Log::info("Starting OCR extraction", ['path' => $imagePath]);
+
+        $command = "tesseract '$imagePath' stdout 2>&1";
         $output = shell_exec($command);
 
-        if ($output === null) {
+        Log::info("Tesseract output", ['output' => $output]);
+
+        if ($output === null || trim($output) === '') {
             throw new \Exception('Tesseract OCR failed to process image');
         }
 
@@ -239,11 +242,21 @@ class OCRController extends Controller
     /**
      * Parse date from Amazon Flex format
      */
+    // parseDate method'unu güncelle
     private function parseDate($dateLine)
     {
+        Log::info("Parsing date line: " . $dateLine);
+
         $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/';
 
         if (preg_match($pattern, $dateLine, $matches)) {
+            Log::info("Date pattern matched", ['matches' => $matches]);
+
+            if (!isset($matches[2])) {
+                Log::error("Missing month in matches array", ['matches' => $matches]);
+                return null;
+            }
+
             $monthName = $matches[2];
             $day = intval($matches[3]);
 
@@ -254,9 +267,11 @@ class OCRController extends Controller
             ];
 
             $month = $months[$monthName];
-            $year = date('Y'); // Assume current year
+            $year = date('Y');
 
             return Carbon::createFromDate($year, $month, $day);
+        } else {
+            Log::info("Date pattern did not match");
         }
 
         return null;

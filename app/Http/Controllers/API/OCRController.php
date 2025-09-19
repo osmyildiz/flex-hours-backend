@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Http;
 use App\Models\WorkEntry;
 use Carbon\Carbon;
 
@@ -30,29 +31,34 @@ class OCRController extends Controller
 
             Log::info("OCR: Processing image", ['user_id' => $userId, 'path' => $fullPath]);
 
-            // Extract text using Tesseract OCR
-            $extractedText = $this->extractTextFromImage($fullPath);
+            // Try GPT-4 Vision first
+            $result = $this->processWithGPTVision($fullPath);
 
-            Log::info("OCR: Extracted text", ['text' => $extractedText]);
+            if (!$result['success']) {
+                Log::warning("GPT-4 Vision failed, falling back to Tesseract", ['error' => $result['error']]);
+                // Fallback to Tesseract OCR
+                $result = $this->processWithTesseract($fullPath);
+            }
 
-            // Parse Amazon Flex format
-            $parsedEntries = $this->parseAmazonFlexEarnings($extractedText);
+            if (!$result['success']) {
+                throw new \Exception('All OCR methods failed: ' . $result['error']);
+            }
 
-            Log::info("OCR: Parsed entries", ['count' => count($parsedEntries)]);
+            Log::info("OCR: Parsed entries", ['count' => count($result['entries']), 'method' => $result['method']]);
 
             // Save valid entries to database
             $savedEntries = [];
-            foreach ($parsedEntries as $entryData) {
-                if ($entryData['is_valid']) {
+            foreach ($result['entries'] as $entryData) {
+                if ($this->isValidEntry($entryData)) {
                     $workEntry = WorkEntry::create([
                         'user_id' => $userId,
                         'date' => $entryData['date'],
-                        'hours_worked' => $entryData['hours_worked'],
-                        'earnings' => $entryData['earnings'],
+                        'hours_worked' => $this->calculateHoursFromTimes($entryData['start_time'], $entryData['end_time']),
+                        'earnings' => $entryData['total_earnings'],
                         'base_pay' => $entryData['base_pay'],
                         'tips' => $entryData['tips'],
-                        'service_type' => $entryData['service_type'],
-                        'notes' => 'OCR imported: ' . $entryData['original_text'],
+                        'service_type' => $entryData['service_type'] ?? $this->determineServiceType($entryData),
+                        'notes' => 'OCR imported via ' . $result['method'],
                     ]);
 
                     $savedEntries[] = $workEntry;
@@ -65,10 +71,10 @@ class OCRController extends Controller
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'extracted_text' => $extractedText,
-                    'parsed_entries' => $parsedEntries,
+                    'parsed_entries' => $result['entries'],
                     'saved_entries' => count($savedEntries),
                     'entries' => $savedEntries,
+                    'method' => $result['method'],
                 ],
                 'message' => count($savedEntries) . ' work entries saved successfully',
             ]);
@@ -93,6 +99,163 @@ class OCRController extends Controller
     }
 
     /**
+     * Process image with OpenAI GPT-4 Vision API
+     */
+    private function processWithGPTVision($imagePath)
+    {
+        try {
+            if (!env('OPENAI_API_KEY')) {
+                return ['success' => false, 'error' => 'OpenAI API key not configured'];
+            }
+
+            Log::info("Starting GPT-4 Vision processing", ['path' => $imagePath]);
+
+            // Verify file exists and read it
+            if (!file_exists($imagePath)) {
+                throw new \Exception('Image file not found: ' . $imagePath);
+            }
+
+            $base64Image = base64_encode(file_get_contents($imagePath));
+            $mimeType = $this->getMimeType($imagePath);
+
+            $response = Http::timeout(60)->withHeaders([
+                'Authorization' => 'Bearer ' . env('OPENAI_API_KEY'),
+                'Content-Type' => 'application/json',
+            ])->post('https://api.openai.com/v1/chat/completions', [
+                'model' => 'gpt-4o', // Latest vision model
+                'messages' => [
+                    [
+                        'role' => 'user',
+                        'content' => [
+                            [
+                                'type' => 'text',
+                                'text' => 'Extract ALL work entries from this Amazon Flex earnings screenshot.
+
+Return ONLY a JSON object with this exact structure:
+
+{
+  "entries": [
+    {
+      "date": "2024-09-18",
+      "start_time": "9:21 AM",
+      "end_time": "10:30 AM",
+      "total_earnings": 30.00,
+      "base_pay": null,
+      "tips": null,
+      "service_type": "logistics"
+    }
+  ]
+}
+
+STRICT RULES:
+- Date format: YYYY-MM-DD (assume current year 2024)
+- Time format: "H:MM AM/PM" (exact format with space)
+- If "Tips pending" or only total shown: set base_pay=null, tips=null
+- If separate Base and Tips shown: include both as numbers
+- Service type: "whole_foods" if base+tips shown separately, "logistics" if just total
+- Include ALL visible entries in the screenshot
+- Return ONLY valid JSON, no explanation or additional text
+- Parse ALL entries you can see, even if partially visible'
+                            ],
+                            [
+                                'type' => 'image_url',
+                                'image_url' => [
+                                    'url' => "data:{$mimeType};base64,{$base64Image}",
+                                    'detail' => 'high' // High detail for better OCR accuracy
+                                ]
+                            ]
+                        ]
+                    ]
+                ],
+                'response_format' => [
+                    'type' => 'json_object'
+                ],
+                'max_tokens' => 2000,
+                'temperature' => 0.1 // Low temperature for consistent parsing
+            ]);
+
+            if ($response->successful()) {
+                $data = $response->json();
+
+                if (!isset($data['choices'][0]['message']['content'])) {
+                    throw new \Exception('Invalid OpenAI API response structure');
+                }
+
+                $content = $data['choices'][0]['message']['content'];
+                Log::info("GPT-4 Vision raw response", ['content' => $content]);
+
+                $parsedData = json_decode($content, true);
+
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    throw new \Exception('Invalid JSON response from GPT-4: ' . json_last_error_msg());
+                }
+
+                if (!isset($parsedData['entries']) || !is_array($parsedData['entries'])) {
+                    throw new \Exception('Invalid entries structure in GPT-4 response');
+                }
+
+                Log::info("GPT-4 Vision successful", [
+                    'entries_count' => count($parsedData['entries']),
+                    'entries' => $parsedData['entries']
+                ]);
+
+                return [
+                    'success' => true,
+                    'entries' => $parsedData['entries'],
+                    'method' => 'gpt4_vision'
+                ];
+            }
+
+            $errorBody = $response->body();
+            $errorData = $response->json();
+
+            Log::error("OpenAI API failed", [
+                'status' => $response->status(),
+                'body' => $errorBody,
+                'error' => $errorData['error'] ?? 'Unknown error'
+            ]);
+
+            return ['success' => false, 'error' => 'OpenAI API failed: ' . ($errorData['error']['message'] ?? $errorBody)];
+
+        } catch (\Exception $e) {
+            Log::error('GPT-4 Vision failed', ['error' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
+            return ['success' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Fallback: Process with Tesseract OCR and regex parsing
+     */
+    private function processWithTesseract($imagePath)
+    {
+        try {
+            Log::info("Starting Tesseract fallback processing", ['path' => $imagePath]);
+
+            // Extract text using Tesseract OCR
+            $extractedText = $this->extractTextFromImage($imagePath);
+            Log::info("Tesseract extracted text", ['text' => $extractedText]);
+
+            // Parse Amazon Flex format with regex
+            $parsedEntries = $this->parseAmazonFlexEarnings($extractedText);
+
+            return [
+                'success' => count($parsedEntries) > 0,
+                'entries' => $parsedEntries,
+                'method' => 'tesseract_regex',
+                'error' => count($parsedEntries) == 0 ? 'No entries found with regex parsing' : null
+            ];
+
+        } catch (\Exception $e) {
+            Log::error("Tesseract processing failed", ['error' => $e->getMessage()]);
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+                'method' => 'tesseract_regex'
+            ];
+        }
+    }
+
+    /**
      * Extract text from image using Tesseract OCR
      */
     private function extractTextFromImage($imagePath)
@@ -100,7 +263,6 @@ class OCRController extends Controller
         try {
             Log::info("Starting OCR extraction", ['path' => $imagePath]);
 
-            // Verify file exists
             if (!file_exists($imagePath)) {
                 throw new \Exception('Image file not found: ' . $imagePath);
             }
@@ -126,63 +288,33 @@ class OCRController extends Controller
      */
     private function cleanOCRText($text)
     {
-        // Remove common OCR artifacts and normalize whitespace
-        $text = preg_replace('/[^\x20-\x7E\n\r\t]/', '', $text); // Remove non-printable chars
-        $text = preg_replace('/\s+/', ' ', $text); // Normalize whitespace
-        $text = str_replace('\n', "\n", $text); // Ensure proper line breaks
+        $text = preg_replace('/[^\x20-\x7E\n\r\t]/', '', $text);
+        $text = preg_replace('/\s+/', ' ', $text);
+        $text = str_replace('\n', "\n", $text);
 
         return trim($text);
     }
 
     /**
-     * Parse Amazon Flex earnings format
+     * Parse Amazon Flex earnings format (Tesseract fallback)
      */
     private function parseAmazonFlexEarnings($ocrText)
     {
         try {
-            Log::info("OCR text received", ['text' => $ocrText]);
-
             $entries = [];
-
-            // Clean and normalize the text first
-            $cleanedText = $this->cleanOCRText($ocrText);
-            $lines = array_filter(array_map('trim', explode("\n", $cleanedText)));
-
-            Log::info("Lines parsed", ['count' => count($lines), 'lines' => $lines]);
-
-            // Debug: Log each line to see what we're working with
-            foreach ($lines as $index => $line) {
-                Log::info("Line $index", ['content' => $line, 'length' => strlen($line)]);
-            }
+            $lines = array_filter(array_map('trim', explode("\n", $this->cleanOCRText($ocrText))));
 
             for ($i = 0; $i < count($lines); $i++) {
                 $line = $lines[$i];
 
-                try {
-                    Log::info("Checking line for date pattern", ['line' => $line, 'index' => $i]);
-
-                    if ($this->isDateLine($line)) {
-                        Log::info("Found date line, processing entry", ['line' => $line, 'index' => $i]);
-                        $entry = $this->parseEntry($lines, $i);
-                        if ($entry) {
-                            Log::info("Entry parsed successfully", ['entry' => $entry]);
-                            $entries[] = $entry;
-                        } else {
-                            Log::warning("Entry parsing failed for date line", ['line' => $line]);
-                        }
+                if ($this->isDateLine($line)) {
+                    $entry = $this->parseEntry($lines, $i);
+                    if ($entry) {
+                        $entries[] = $entry;
                     }
-                } catch (\Exception $e) {
-                    Log::error("Error parsing line", [
-                        'line' => $line,
-                        'index' => $i,
-                        'error' => $e->getMessage(),
-                        'trace' => $e->getTraceAsString()
-                    ]);
-                    continue; // Skip problematic line
                 }
             }
 
-            Log::info("Total entries parsed", ['count' => count($entries)]);
             return $entries;
         } catch (\Exception $e) {
             Log::error("parseAmazonFlexEarnings failed", ['error' => $e->getMessage()]);
@@ -191,41 +323,12 @@ class OCRController extends Controller
     }
 
     /**
-     * Check if line contains date pattern
-     */
-    private function isDateLine($line)
-    {
-        try {
-            // More flexible pattern to handle different OCR variations
-            $patterns = [
-                '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}$/i',
-                '/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}$/i',
-                '/(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}/i'
-            ];
-
-            foreach ($patterns as $pattern) {
-                if (preg_match($pattern, $line) === 1) {
-                    Log::info("Date pattern matched", ['line' => $line, 'pattern' => $pattern]);
-                    return true;
-                }
-            }
-
-            return false;
-        } catch (\Exception $e) {
-            Log::error("isDateLine failed", ['line' => $line, 'error' => $e->getMessage()]);
-            return false;
-        }
-    }
-
-    /**
-     * Parse single entry from lines starting at date
+     * Parse single entry from Tesseract lines
      */
     private function parseEntry($lines, $startIndex)
     {
         try {
-            if ($startIndex >= count($lines)) {
-                return null;
-            }
+            if ($startIndex >= count($lines)) return null;
 
             $dateLine = $lines[$startIndex];
             $timeLine = null;
@@ -235,332 +338,232 @@ class OCRController extends Controller
 
             // Look for related data in next few lines
             for ($i = $startIndex + 1; $i < count($lines) && $i < $startIndex + 6; $i++) {
-                if ($i >= count($lines)) {
-                    break;
-                }
+                if ($i >= count($lines)) break;
 
                 $line = $lines[$i];
 
-                // Check for time pattern: "9:21 AM - 10:30 AM"
                 if ($this->isTimeLine($line)) {
                     $timeLine = $line;
                 }
 
-                // Check for total earnings: "$30", "$53.50"
                 if ($this->isEarningsLine($line)) {
                     $totalEarnings = $this->parseEarnings($line);
                 }
 
-                // Check for base/tips: "Base: $51 Tips: $48"
                 if (strpos($line, 'Base:') !== false && strpos($line, 'Tips:') !== false) {
-                    $baseMatches = $this->safeRegexMatch('/Base:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, 1);
-                    if ($baseMatches) {
-                        $basePay = floatval($baseMatches[1]);
+                    if (preg_match('/Base:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
+                        $basePay = isset($matches[1]) ? floatval($matches[1]) : null;
                     }
-
-                    $tipMatches = $this->safeRegexMatch('/Tips:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, 1);
-                    if ($tipMatches) {
-                        $tips = floatval($tipMatches[1]);
+                    if (preg_match('/Tips:\s*\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
+                        $tips = isset($matches[1]) ? floatval($matches[1]) : null;
                     }
                 }
 
-                // Stop if we hit another date
                 if ($this->isDateLine($line) && $i > $startIndex) {
                     break;
                 }
             }
 
-            // Validate required fields
             if (!$timeLine || $totalEarnings === null) {
-                Log::warning("Entry missing required fields", [
-                    'date_line' => $dateLine,
-                    'time_line' => $timeLine,
-                    'earnings' => $totalEarnings
-                ]);
                 return null;
             }
 
-            // Parse date
             $parsedDate = $this->parseDate($dateLine);
-            if (!$parsedDate) {
-                Log::warning("Failed to parse date", ['date_line' => $dateLine]);
-                return null;
-            }
+            if (!$parsedDate) return null;
 
-            // Calculate hours
-            $hoursWorked = $this->calculateHours($timeLine);
-            if ($hoursWorked <= 0) {
-                Log::warning("Invalid hours calculated", ['time_line' => $timeLine, 'hours' => $hoursWorked]);
-                return null;
-            }
+            $times = $this->parseTimeRange($timeLine);
+            if (!$times) return null;
 
-            // Determine service type
             $serviceType = ($basePay !== null && $tips !== null) ? 'whole_foods' : 'logistics';
 
             return [
                 'date' => $parsedDate->format('Y-m-d'),
-                'time_range' => $timeLine,
-                'hours_worked' => $hoursWorked,
-                'earnings' => $totalEarnings,
+                'start_time' => $times['start'],
+                'end_time' => $times['end'],
+                'total_earnings' => $totalEarnings,
                 'base_pay' => $basePay,
                 'tips' => $tips,
                 'service_type' => $serviceType,
-                'original_text' => $dateLine . ' ' . $timeLine,
-                'is_valid' => $totalEarnings > 0 && $hoursWorked > 0,
             ];
         } catch (\Exception $e) {
-            Log::error("parseEntry failed", [
-                'start_index' => $startIndex,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
+            Log::error("parseEntry failed", ['error' => $e->getMessage()]);
             return null;
         }
     }
 
     /**
-     * Check if line contains time pattern
+     * Validate entry data
      */
+    private function isValidEntry($entry)
+    {
+        return isset($entry['date'])
+            && isset($entry['start_time'])
+            && isset($entry['end_time'])
+            && isset($entry['total_earnings'])
+            && $entry['total_earnings'] > 0
+            && $this->isValidDate($entry['date'])
+            && $this->isValidTime($entry['start_time'])
+            && $this->isValidTime($entry['end_time']);
+    }
+
+    /**
+     * Calculate hours from start and end times
+     */
+    private function calculateHoursFromTimes($startTime, $endTime)
+    {
+        try {
+            $start = Carbon::createFromFormat('g:i A', $startTime);
+            $end = Carbon::createFromFormat('g:i A', $endTime);
+
+            if ($end->lt($start)) {
+                $end->addDay(); // Handle overnight shifts
+            }
+
+            return round($start->diffInMinutes($end) / 60, 2);
+        } catch (\Exception $e) {
+            Log::error("calculateHoursFromTimes failed", ['start' => $startTime, 'end' => $endTime, 'error' => $e->getMessage()]);
+            return 2.0; // Fallback
+        }
+    }
+
+    /**
+     * Determine service type from entry data
+     */
+    private function determineServiceType($entry)
+    {
+        if (isset($entry['base_pay']) && isset($entry['tips']) &&
+            $entry['base_pay'] !== null && $entry['tips'] !== null) {
+            return 'whole_foods';
+        }
+        return 'logistics';
+    }
+
+    /**
+     * Get MIME type of image
+     */
+    private function getMimeType($imagePath)
+    {
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $mimeType = finfo_file($finfo, $imagePath);
+        finfo_close($finfo);
+        return $mimeType ?: 'image/jpeg';
+    }
+
+    /**
+     * Validate date format
+     */
+    private function isValidDate($date)
+    {
+        try {
+            Carbon::createFromFormat('Y-m-d', $date);
+            return true;
+        } catch (\Exception $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Validate time format
+     */
+    private function isValidTime($time)
+    {
+        try {
+            Carbon::createFromFormat('g:i A', $time);
+            return true;
+        } catch (\Exception $e) {
+            return false;
+        }
+    }
+
+    // Legacy methods for Tesseract fallback
+    private function isDateLine($line)
+    {
+        $patterns = [
+            '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}$/i',
+            '/(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}/i'
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $line) === 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private function isTimeLine($line)
     {
-        try {
-            // More flexible patterns for time ranges
-            $patterns = [
-                '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/i',
-                '/\d{1,2}:\d{2}\s+(AM|PM)\s*[-–]\s*\d{1,2}:\d{2}\s+(AM|PM)/i', // Handle different dash types
-                '/\d{1,2}:\d{2}(AM|PM)\s*[-–]\s*\d{1,2}:\d{2}(AM|PM)/i' // Handle no space before AM/PM
-            ];
+        $patterns = [
+            '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/i',
+            '/\d{1,2}:\d{2}\s+(AM|PM)\s*[-–]\s*\d{1,2}:\d{2}\s+(AM|PM)/i',
+        ];
 
-            foreach ($patterns as $pattern) {
-                if (preg_match($pattern, $line) === 1) {
-                    Log::info("Time pattern matched", ['line' => $line, 'pattern' => $pattern]);
-                    return true;
-                }
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $line) === 1) {
+                return true;
             }
-
-            return false;
-        } catch (\Exception $e) {
-            Log::error("isTimeLine failed", ['line' => $line, 'error' => $e->getMessage()]);
-            return false;
         }
+        return false;
     }
 
-    /**
-     * Check if line contains earnings
-     */
     private function isEarningsLine($line)
     {
-        try {
-            $pattern = '/^\$\d+(?:\.\d{2})?$/';
-            return preg_match($pattern, $line) === 1;
-        } catch (\Exception $e) {
-            Log::error("isEarningsLine failed", ['line' => $line, 'error' => $e->getMessage()]);
-            return false;
-        }
+        return preg_match('/^\$\d+(?:\.\d{2})?$/', $line) === 1;
     }
 
-    /**
-     * Parse earnings from line
-     */
     private function parseEarnings($line)
     {
-        try {
-            $matches = $this->safeRegexMatch('/\$([0-9]+(?:\.[0-9]{2})?)/', $line, 1);
-            if ($matches) {
-                return floatval($matches[1]);
-            }
-            return null;
-        } catch (\Exception $e) {
-            Log::error("parseEarnings failed", ['line' => $line, 'error' => $e->getMessage()]);
-            return null;
+        if (preg_match('/\$([0-9]+(?:\.[0-9]{2})?)/', $line, $matches)) {
+            return isset($matches[1]) ? floatval($matches[1]) : null;
         }
+        return null;
     }
 
-    /**
-     * Parse date from Amazon Flex format
-     */
     private function parseDate($dateLine)
     {
-        try {
-            Log::info("Parsing date line: " . $dateLine);
+        $patterns = [
+            '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/i',
+            '/(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})/i'
+        ];
 
-            $patterns = [
-                '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/i',
-                '/(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})/i'
-            ];
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $dateLine, $matches)) {
+                $monthName = ucfirst(strtolower($matches[2]));
+                $day = intval($matches[3]);
 
-            foreach ($patterns as $pattern) {
-                $matches = $this->safeRegexMatch($pattern, $dateLine, 3);
+                $months = [
+                    'Jan' => 1, 'Feb' => 2, 'Mar' => 3, 'Apr' => 4,
+                    'May' => 5, 'Jun' => 6, 'Jul' => 7, 'Aug' => 8,
+                    'Sep' => 9, 'Oct' => 10, 'Nov' => 11, 'Dec' => 12,
+                ];
 
-                if ($matches) {
-                    Log::info("Date matches", ['matches' => $matches, 'pattern' => $pattern]);
-
-                    $dayName = $matches[1];
-                    $monthName = ucfirst(strtolower($matches[2])); // Normalize case
-                    $day = intval($matches[3]);
-
-                    $months = [
-                        'Jan' => 1, 'Feb' => 2, 'Mar' => 3, 'Apr' => 4,
-                        'May' => 5, 'Jun' => 6, 'Jul' => 7, 'Aug' => 8,
-                        'Sep' => 9, 'Oct' => 10, 'Nov' => 11, 'Dec' => 12,
-                    ];
-
-                    if (!isset($months[$monthName])) {
-                        Log::error("Invalid month name", ['month' => $monthName]);
-                        continue;
-                    }
-
-                    if ($day < 1 || $day > 31) {
-                        Log::error("Invalid day", ['day' => $day]);
-                        continue;
-                    }
-
+                if (isset($months[$monthName])) {
                     $month = $months[$monthName];
                     $year = date('Y');
-
-                    try {
-                        return Carbon::createFromDate($year, $month, $day);
-                    } catch (\Exception $e) {
-                        Log::error("Carbon date creation failed", [
-                            'year' => $year,
-                            'month' => $month,
-                            'day' => $day,
-                            'error' => $e->getMessage()
-                        ]);
-                        continue;
-                    }
+                    return Carbon::createFromDate($year, $month, $day);
                 }
             }
-
-            Log::info("No date pattern matched");
-            return null;
-        } catch (\Exception $e) {
-            Log::error("parseDate failed", ['dateLine' => $dateLine, 'error' => $e->getMessage()]);
-            return null;
         }
+        return null;
     }
 
-    /**
-     * Calculate hours from time range
-     */
-    private function calculateHours($timeRange)
+    private function parseTimeRange($timeRange)
     {
-        try {
-            $patterns = [
-                '/(\d{1,2}):(\d{2})\s+(AM|PM)\s*[-–]\s*(\d{1,2}):(\d{2})\s+(AM|PM)/i',
-                '/(\d{1,2}):(\d{2})(AM|PM)\s*[-–]\s*(\d{1,2}):(\d{2})(AM|PM)/i'
-            ];
+        $patterns = [
+            '/(\d{1,2}):(\d{2})\s+(AM|PM)\s*[-–]\s*(\d{1,2}):(\d{2})\s+(AM|PM)/i',
+        ];
 
-            foreach ($patterns as $pattern) {
-                $matches = $this->safeRegexMatch($pattern, $timeRange, 6);
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $timeRange, $matches)) {
+                $startTime = $matches[1] . ':' . $matches[2] . ' ' . strtoupper($matches[3]);
+                $endTime = $matches[4] . ':' . $matches[5] . ' ' . strtoupper($matches[6]);
 
-                if ($matches) {
-                    Log::info("Time calculation pattern matched", ['matches' => $matches, 'pattern' => $pattern]);
-
-                    $startHour = intval($matches[1]);
-                    $startMinute = intval($matches[2]);
-                    $startPeriod = strtoupper($matches[3]);
-
-                    $endHour = intval($matches[4]);
-                    $endMinute = intval($matches[5]);
-                    $endPeriod = strtoupper($matches[6]);
-
-                    // Validate time components
-                    if ($startHour < 1 || $startHour > 12 || $endHour < 1 || $endHour > 12) {
-                        Log::error("Invalid hour values", [
-                            'start_hour' => $startHour,
-                            'end_hour' => $endHour,
-                            'time_range' => $timeRange
-                        ]);
-                        continue;
-                    }
-
-                    if ($startMinute < 0 || $startMinute > 59 || $endMinute < 0 || $endMinute > 59) {
-                        Log::error("Invalid minute values", [
-                            'start_minute' => $startMinute,
-                            'end_minute' => $endMinute,
-                            'time_range' => $timeRange
-                        ]);
-                        continue;
-                    }
-
-                    // Convert to 24-hour format
-                    if ($startPeriod === 'PM' && $startHour !== 12) {
-                        $startHour += 12;
-                    }
-                    if ($startPeriod === 'AM' && $startHour === 12) {
-                        $startHour = 0;
-                    }
-
-                    if ($endPeriod === 'PM' && $endHour !== 12) {
-                        $endHour += 12;
-                    }
-                    if ($endPeriod === 'AM' && $endHour === 12) {
-                        $endHour = 0;
-                    }
-
-                    // Calculate duration in minutes
-                    $startMinutes = ($startHour * 60) + $startMinute;
-                    $endMinutes = ($endHour * 60) + $endMinute;
-
-                    // Handle overnight shifts
-                    if ($endMinutes < $startMinutes) {
-                        $endMinutes += (24 * 60);
-                    }
-
-                    $durationMinutes = $endMinutes - $startMinutes;
-
-                    if ($durationMinutes <= 0) {
-                        Log::warning("Zero or negative duration calculated", [
-                            'time_range' => $timeRange,
-                            'duration_minutes' => $durationMinutes
-                        ]);
-                        continue;
-                    }
-
-                    $hours = round($durationMinutes / 60, 2);
-                    Log::info("Hours calculated successfully", [
-                        'time_range' => $timeRange,
-                        'hours' => $hours
-                    ]);
-
-                    return $hours;
-                }
+                return [
+                    'start' => $startTime,
+                    'end' => $endTime
+                ];
             }
-
-            Log::warning("No time pattern matched", ['time_range' => $timeRange]);
-            return 2.0; // Fallback
-        } catch (\Exception $e) {
-            Log::error("calculateHours failed", ['timeRange' => $timeRange, 'error' => $e->getMessage()]);
-            return 2.0; // Fallback
         }
-    }
-
-    /**
-     * Safe regex matching with validation
-     */
-    private function safeRegexMatch($pattern, $subject, $expectedGroups = 1)
-    {
-        try {
-            if (preg_match($pattern, $subject, $matches)) {
-                if (count($matches) >= $expectedGroups + 1) { // +1 for full match
-                    return $matches;
-                }
-                Log::warning("Regex matched but insufficient groups", [
-                    'pattern' => $pattern,
-                    'subject' => $subject,
-                    'expected' => $expectedGroups,
-                    'actual' => count($matches) - 1
-                ]);
-            }
-            return false;
-        } catch (\Exception $e) {
-            Log::error("safeRegexMatch failed", [
-                'pattern' => $pattern,
-                'subject' => $subject,
-                'error' => $e->getMessage()
-            ]);
-            return false;
-        }
+        return null;
     }
 }

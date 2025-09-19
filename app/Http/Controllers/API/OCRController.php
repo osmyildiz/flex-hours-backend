@@ -133,7 +133,10 @@ class OCRController extends Controller
     private function processWithGPTVision($imagePath)
     {
         try {
+            Log::info("GPT-4 Vision method called", ['path' => $imagePath]);
+
             if (!env('OPENAI_API_KEY')) {
+                Log::error("OpenAI API key not configured");
                 return ['success' => false, 'error' => 'OpenAI API key not configured'];
             }
 

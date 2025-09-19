@@ -731,5 +731,4 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
         finfo_close($finfo);
         return $mimeType ?: 'image/jpeg';
     }
-
 }

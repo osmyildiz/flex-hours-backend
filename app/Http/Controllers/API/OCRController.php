@@ -182,15 +182,12 @@ STRICT RULES:
 - total_earnings: THE MAIN DOLLAR AMOUNT shown prominently (e.g. $30, $53.50, $99, $81)
 - If you see "Base: $51.00 Tips: $48.00" format: total_earnings = base + tips (e.g. $99.00), base_pay = 51.00, tips = 48.00
 - If only one amount shown: that is total_earnings, set base_pay=null, tips=null
-- If you see "Tips pending" text: set service_type="whole_foods", base_pay=null, tips=null
-- Service type rules:
-  * "whole_foods" if base+tips shown separately OR if "Tips pending" appears anywhere
-  * "logistics" if just total amount with no base/tips breakdown
+- Service type: "whole_foods" if base+tips shown separately, "logistics" if just total
 - NEVER set total_earnings to 0.00 - it should be the main visible dollar amount
 - Include ALL visible entries in the screenshot
 - Return ONLY valid JSON, no explanation or additional text
 
-IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are the TOTAL EARNINGS, not components. If you see "Tips pending", this is definitely a grocery/whole_foods entry.'
+IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are the TOTAL EARNINGS, not components.'
                             ],
                             [
                                 'type' => 'image_url',
@@ -511,18 +508,10 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
      */
     private function determineServiceType($entry)
     {
-        // Check if base_pay and tips are both present and not null
         if (isset($entry['base_pay']) && isset($entry['tips']) &&
             $entry['base_pay'] !== null && $entry['tips'] !== null) {
             return 'whole_foods';
         }
-
-        // Check if this is explicitly marked as whole_foods (from GPT-4 Vision detecting "Tips pending")
-        if (isset($entry['service_type']) && $entry['service_type'] === 'whole_foods') {
-            return 'whole_foods';
-        }
-
-        // Default to logistics for Amazon deliveries
         return 'logistics';
     }
 

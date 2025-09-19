@@ -143,31 +143,46 @@ class OCRController extends Controller
             Log::info("OCR text received", ['text' => $ocrText]);
 
             $entries = [];
-            $lines = array_filter(array_map('trim', explode("\n", $ocrText)));
+
+            // Clean and normalize the text first
+            $cleanedText = $this->cleanOCRText($ocrText);
+            $lines = array_filter(array_map('trim', explode("\n", $cleanedText)));
 
             Log::info("Lines parsed", ['count' => count($lines), 'lines' => $lines]);
+
+            // Debug: Log each line to see what we're working with
+            foreach ($lines as $index => $line) {
+                Log::info("Line $index", ['content' => $line, 'length' => strlen($line)]);
+            }
 
             for ($i = 0; $i < count($lines); $i++) {
                 $line = $lines[$i];
 
                 try {
+                    Log::info("Checking line for date pattern", ['line' => $line, 'index' => $i]);
+
                     if ($this->isDateLine($line)) {
-                        Log::info("Processing date line", ['line' => $line, 'index' => $i]);
+                        Log::info("Found date line, processing entry", ['line' => $line, 'index' => $i]);
                         $entry = $this->parseEntry($lines, $i);
                         if ($entry) {
+                            Log::info("Entry parsed successfully", ['entry' => $entry]);
                             $entries[] = $entry;
+                        } else {
+                            Log::warning("Entry parsing failed for date line", ['line' => $line]);
                         }
                     }
                 } catch (\Exception $e) {
                     Log::error("Error parsing line", [
                         'line' => $line,
                         'index' => $i,
-                        'error' => $e->getMessage()
+                        'error' => $e->getMessage(),
+                        'trace' => $e->getTraceAsString()
                     ]);
                     continue; // Skip problematic line
                 }
             }
 
+            Log::info("Total entries parsed", ['count' => count($entries)]);
             return $entries;
         } catch (\Exception $e) {
             Log::error("parseAmazonFlexEarnings failed", ['error' => $e->getMessage()]);
@@ -181,8 +196,21 @@ class OCRController extends Controller
     private function isDateLine($line)
     {
         try {
-            $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}$/';
-            return preg_match($pattern, $line) === 1;
+            // More flexible pattern to handle different OCR variations
+            $patterns = [
+                '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}$/i',
+                '/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}$/i',
+                '/(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}/i'
+            ];
+
+            foreach ($patterns as $pattern) {
+                if (preg_match($pattern, $line) === 1) {
+                    Log::info("Date pattern matched", ['line' => $line, 'pattern' => $pattern]);
+                    return true;
+                }
+            }
+
+            return false;
         } catch (\Exception $e) {
             Log::error("isDateLine failed", ['line' => $line, 'error' => $e->getMessage()]);
             return false;
@@ -296,8 +324,21 @@ class OCRController extends Controller
     private function isTimeLine($line)
     {
         try {
-            $pattern = '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/';
-            return preg_match($pattern, $line) === 1;
+            // More flexible patterns for time ranges
+            $patterns = [
+                '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/i',
+                '/\d{1,2}:\d{2}\s+(AM|PM)\s*[-–]\s*\d{1,2}:\d{2}\s+(AM|PM)/i', // Handle different dash types
+                '/\d{1,2}:\d{2}(AM|PM)\s*[-–]\s*\d{1,2}:\d{2}(AM|PM)/i' // Handle no space before AM/PM
+            ];
+
+            foreach ($patterns as $pattern) {
+                if (preg_match($pattern, $line) === 1) {
+                    Log::info("Time pattern matched", ['line' => $line, 'pattern' => $pattern]);
+                    return true;
+                }
+            }
+
+            return false;
         } catch (\Exception $e) {
             Log::error("isTimeLine failed", ['line' => $line, 'error' => $e->getMessage()]);
             return false;
@@ -343,49 +384,55 @@ class OCRController extends Controller
         try {
             Log::info("Parsing date line: " . $dateLine);
 
-            $pattern = '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/';
-            $matches = $this->safeRegexMatch($pattern, $dateLine, 3);
+            $patterns = [
+                '/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})$/i',
+                '/(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})/i'
+            ];
 
-            if ($matches) {
-                Log::info("Date matches", ['matches' => $matches]);
+            foreach ($patterns as $pattern) {
+                $matches = $this->safeRegexMatch($pattern, $dateLine, 3);
 
-                $dayName = $matches[1];
-                $monthName = $matches[2];
-                $day = intval($matches[3]);
+                if ($matches) {
+                    Log::info("Date matches", ['matches' => $matches, 'pattern' => $pattern]);
 
-                $months = [
-                    'Jan' => 1, 'Feb' => 2, 'Mar' => 3, 'Apr' => 4,
-                    'May' => 5, 'Jun' => 6, 'Jul' => 7, 'Aug' => 8,
-                    'Sep' => 9, 'Oct' => 10, 'Nov' => 11, 'Dec' => 12,
-                ];
+                    $dayName = $matches[1];
+                    $monthName = ucfirst(strtolower($matches[2])); // Normalize case
+                    $day = intval($matches[3]);
 
-                if (!isset($months[$monthName])) {
-                    Log::error("Invalid month name", ['month' => $monthName]);
-                    return null;
-                }
+                    $months = [
+                        'Jan' => 1, 'Feb' => 2, 'Mar' => 3, 'Apr' => 4,
+                        'May' => 5, 'Jun' => 6, 'Jul' => 7, 'Aug' => 8,
+                        'Sep' => 9, 'Oct' => 10, 'Nov' => 11, 'Dec' => 12,
+                    ];
 
-                if ($day < 1 || $day > 31) {
-                    Log::error("Invalid day", ['day' => $day]);
-                    return null;
-                }
+                    if (!isset($months[$monthName])) {
+                        Log::error("Invalid month name", ['month' => $monthName]);
+                        continue;
+                    }
 
-                $month = $months[$monthName];
-                $year = date('Y');
+                    if ($day < 1 || $day > 31) {
+                        Log::error("Invalid day", ['day' => $day]);
+                        continue;
+                    }
 
-                try {
-                    return Carbon::createFromDate($year, $month, $day);
-                } catch (\Exception $e) {
-                    Log::error("Carbon date creation failed", [
-                        'year' => $year,
-                        'month' => $month,
-                        'day' => $day,
-                        'error' => $e->getMessage()
-                    ]);
-                    return null;
+                    $month = $months[$monthName];
+                    $year = date('Y');
+
+                    try {
+                        return Carbon::createFromDate($year, $month, $day);
+                    } catch (\Exception $e) {
+                        Log::error("Carbon date creation failed", [
+                            'year' => $year,
+                            'month' => $month,
+                            'day' => $day,
+                            'error' => $e->getMessage()
+                        ]);
+                        continue;
+                    }
                 }
             }
 
-            Log::info("Date pattern did not match");
+            Log::info("No date pattern matched");
             return null;
         } catch (\Exception $e) {
             Log::error("parseDate failed", ['dateLine' => $dateLine, 'error' => $e->getMessage()]);
@@ -399,75 +446,89 @@ class OCRController extends Controller
     private function calculateHours($timeRange)
     {
         try {
-            $pattern = '/^(\d{1,2}):(\d{2})\s+(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s+(AM|PM)$/';
-            $matches = $this->safeRegexMatch($pattern, $timeRange, 6);
+            $patterns = [
+                '/(\d{1,2}):(\d{2})\s+(AM|PM)\s*[-–]\s*(\d{1,2}):(\d{2})\s+(AM|PM)/i',
+                '/(\d{1,2}):(\d{2})(AM|PM)\s*[-–]\s*(\d{1,2}):(\d{2})(AM|PM)/i'
+            ];
 
-            if ($matches) {
-                $startHour = intval($matches[1]);
-                $startMinute = intval($matches[2]);
-                $startPeriod = $matches[3];
+            foreach ($patterns as $pattern) {
+                $matches = $this->safeRegexMatch($pattern, $timeRange, 6);
 
-                $endHour = intval($matches[4]);
-                $endMinute = intval($matches[5]);
-                $endPeriod = $matches[6];
+                if ($matches) {
+                    Log::info("Time calculation pattern matched", ['matches' => $matches, 'pattern' => $pattern]);
 
-                // Validate time components
-                if ($startHour < 1 || $startHour > 12 || $endHour < 1 || $endHour > 12) {
-                    Log::error("Invalid hour values", [
-                        'start_hour' => $startHour,
-                        'end_hour' => $endHour,
-                        'time_range' => $timeRange
-                    ]);
-                    return 2.0; // Fallback
-                }
+                    $startHour = intval($matches[1]);
+                    $startMinute = intval($matches[2]);
+                    $startPeriod = strtoupper($matches[3]);
 
-                if ($startMinute < 0 || $startMinute > 59 || $endMinute < 0 || $endMinute > 59) {
-                    Log::error("Invalid minute values", [
-                        'start_minute' => $startMinute,
-                        'end_minute' => $endMinute,
-                        'time_range' => $timeRange
-                    ]);
-                    return 2.0; // Fallback
-                }
+                    $endHour = intval($matches[4]);
+                    $endMinute = intval($matches[5]);
+                    $endPeriod = strtoupper($matches[6]);
 
-                // Convert to 24-hour format
-                if ($startPeriod === 'PM' && $startHour !== 12) {
-                    $startHour += 12;
-                }
-                if ($startPeriod === 'AM' && $startHour === 12) {
-                    $startHour = 0;
-                }
+                    // Validate time components
+                    if ($startHour < 1 || $startHour > 12 || $endHour < 1 || $endHour > 12) {
+                        Log::error("Invalid hour values", [
+                            'start_hour' => $startHour,
+                            'end_hour' => $endHour,
+                            'time_range' => $timeRange
+                        ]);
+                        continue;
+                    }
 
-                if ($endPeriod === 'PM' && $endHour !== 12) {
-                    $endHour += 12;
-                }
-                if ($endPeriod === 'AM' && $endHour === 12) {
-                    $endHour = 0;
-                }
+                    if ($startMinute < 0 || $startMinute > 59 || $endMinute < 0 || $endMinute > 59) {
+                        Log::error("Invalid minute values", [
+                            'start_minute' => $startMinute,
+                            'end_minute' => $endMinute,
+                            'time_range' => $timeRange
+                        ]);
+                        continue;
+                    }
 
-                // Calculate duration in minutes
-                $startMinutes = ($startHour * 60) + $startMinute;
-                $endMinutes = ($endHour * 60) + $endMinute;
+                    // Convert to 24-hour format
+                    if ($startPeriod === 'PM' && $startHour !== 12) {
+                        $startHour += 12;
+                    }
+                    if ($startPeriod === 'AM' && $startHour === 12) {
+                        $startHour = 0;
+                    }
 
-                // Handle overnight shifts
-                if ($endMinutes < $startMinutes) {
-                    $endMinutes += (24 * 60);
-                }
+                    if ($endPeriod === 'PM' && $endHour !== 12) {
+                        $endHour += 12;
+                    }
+                    if ($endPeriod === 'AM' && $endHour === 12) {
+                        $endHour = 0;
+                    }
 
-                $durationMinutes = $endMinutes - $startMinutes;
+                    // Calculate duration in minutes
+                    $startMinutes = ($startHour * 60) + $startMinute;
+                    $endMinutes = ($endHour * 60) + $endMinute;
 
-                if ($durationMinutes <= 0) {
-                    Log::warning("Zero or negative duration calculated", [
+                    // Handle overnight shifts
+                    if ($endMinutes < $startMinutes) {
+                        $endMinutes += (24 * 60);
+                    }
+
+                    $durationMinutes = $endMinutes - $startMinutes;
+
+                    if ($durationMinutes <= 0) {
+                        Log::warning("Zero or negative duration calculated", [
+                            'time_range' => $timeRange,
+                            'duration_minutes' => $durationMinutes
+                        ]);
+                        continue;
+                    }
+
+                    $hours = round($durationMinutes / 60, 2);
+                    Log::info("Hours calculated successfully", [
                         'time_range' => $timeRange,
-                        'duration_minutes' => $durationMinutes
+                        'hours' => $hours
                     ]);
-                    return 2.0; // Fallback
-                }
 
-                return round($durationMinutes / 60, 2);
+                    return $hours;
+                }
             }
 
-            Log::warning("Time pattern did not match", ['time_range' => $timeRange]);
+            Log::warning("No time pattern matched", ['time_range' => $timeRange]);
             return 2.0; // Fallback
         } catch (\Exception $e) {
             Log::error("calculateHours failed", ['timeRange' => $timeRange, 'error' => $e->getMessage()]);

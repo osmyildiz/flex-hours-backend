@@ -19,6 +19,7 @@ class OCRController extends Controller
     {
         error_log("=== OCR REQUEST STARTED ===");
         Log::emergency("OCR REQUEST DEBUG - This should appear!");
+        file_put_contents('/tmp/ocr_debug.log', "OCR started: " . date('Y-m-d H:i:s') . "\n", FILE_APPEND);
 
         $request->validate([
             'image' => 'required|image|max:10240',
@@ -28,9 +29,12 @@ class OCRController extends Controller
 
         try {
             // Save uploaded image
+            file_put_contents('/tmp/ocr_debug.log', "Starting image processing\n", FILE_APPEND);
+
             $image = $request->file('image');
             $imagePath = $image->store('ocr_uploads', 'public');
             $fullPath = storage_path('app/public/' . $imagePath);
+            file_put_contents('/tmp/ocr_debug.log', "Image saved to: " . $fullPath . "\n", FILE_APPEND);
 
             Log::info("OCR: Processing image", ['user_id' => $userId, 'path' => $fullPath]);
 

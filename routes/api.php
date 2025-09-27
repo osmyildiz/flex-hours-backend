@@ -3,6 +3,7 @@
 use App\Http\Controllers\API\OCRController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Http; // Bu satırı ekle
 use App\Http\Controllers\API\AuthController;
 use App\Http\Controllers\API\WorkEntryController;
 
@@ -24,6 +25,40 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::post('/ocr/upload', [OCRController::class, 'processScreenshot']);
 
+    // TEST ENDPOINT - geçici
+    Route::get('/test-openai', function() {
+        $apiKey = env('OPENAI_API_KEY');
+
+        if (!$apiKey) {
+            return response()->json(['error' => 'No API key found']);
+        }
+
+        try {
+            $response = Http::timeout(30)->withHeaders([
+                'Authorization' => 'Bearer ' . $apiKey,
+                'Content-Type' => 'application/json',
+            ])->post('https://api.openai.com/v1/chat/completions', [
+                'model' => 'gpt-4o',
+                'messages' => [
+                    ['role' => 'user', 'content' => 'Hello, respond with just OK']
+                ],
+                'max_tokens' => 10
+            ]);
+
+            return response()->json([
+                'api_key_length' => strlen($apiKey),
+                'status' => $response->status(),
+                'body' => $response->json(),
+                'success' => $response->successful()
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+                'api_key_length' => strlen($apiKey)
+            ]);
+        }
+    });
 
     // Analytics
     Route::get('/analytics/stats', [WorkEntryController::class, 'stats']);

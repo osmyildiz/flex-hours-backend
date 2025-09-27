@@ -169,7 +169,7 @@ class OCRController extends Controller
                 'Authorization' => 'Bearer ' . $apiKey,
                 'Content-Type' => 'application/json',
             ])->post('https://api.openai.com/v1/chat/completions', [
-                'model' => 'gpt-4-vision-preview',
+                'model' => 'gpt-4o',
                 'messages' => [
                     [
                         'role' => 'user',

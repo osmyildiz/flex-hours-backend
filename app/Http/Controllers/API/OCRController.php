@@ -166,10 +166,10 @@ class OCRController extends Controller
             file_put_contents('/tmp/ocr_debug.log', "Sending OpenAI request...\n", FILE_APPEND);
 
             $response = Http::timeout(60)->withHeaders([
-                'Authorization' => 'Bearer ' . env('OPENAI_API_KEY'),
+                'Authorization' => 'Bearer ' . $apiKey,
                 'Content-Type' => 'application/json',
             ])->post('https://api.openai.com/v1/chat/completions', [
-                'model' => 'gpt-4-vision-preview', // DÜZELTILDI: Doğru model adı
+                'model' => 'gpt-4-vision-preview',
                 'messages' => [
                     [
                         'role' => 'user',
@@ -219,25 +219,43 @@ Rules:
                 'temperature' => 0.1
             ]);
 
+            file_put_contents('/tmp/ocr_debug.log', "OpenAI response status: " . $response->status() . "\n", FILE_APPEND);
+            file_put_contents('/tmp/ocr_debug.log', "OpenAI response successful: " . ($response->successful() ? 'YES' : 'NO') . "\n", FILE_APPEND);
+
+            if (!$response->successful()) {
+                $errorBody = $response->body();
+                file_put_contents('/tmp/ocr_debug.log', "OpenAI error: " . $errorBody . "\n", FILE_APPEND);
+                $errorData = $response->json();
+                return ['success' => false, 'error' => 'OpenAI API failed: ' . ($errorData['error']['message'] ?? $errorBody)];
+            }
+
             if ($response->successful()) {
                 $data = $response->json();
+                file_put_contents('/tmp/ocr_debug.log', "OpenAI response received\n", FILE_APPEND);
 
                 if (!isset($data['choices'][0]['message']['content'])) {
+                    file_put_contents('/tmp/ocr_debug.log', "Invalid OpenAI response structure\n", FILE_APPEND);
                     throw new \Exception('Invalid OpenAI API response structure');
                 }
 
                 $content = $data['choices'][0]['message']['content'];
+                file_put_contents('/tmp/ocr_debug.log', "GPT response content: " . substr($content, 0, 200) . "...\n", FILE_APPEND);
+
                 Log::info("GPT-4 Vision raw response", ['content' => $content]);
 
                 $parsedData = json_decode($content, true);
 
                 if (json_last_error() !== JSON_ERROR_NONE) {
+                    file_put_contents('/tmp/ocr_debug.log', "JSON decode error: " . json_last_error_msg() . "\n", FILE_APPEND);
                     throw new \Exception('Invalid JSON response from GPT-4: ' . json_last_error_msg());
                 }
 
                 if (!isset($parsedData['entries']) || !is_array($parsedData['entries'])) {
+                    file_put_contents('/tmp/ocr_debug.log', "Invalid entries structure\n", FILE_APPEND);
                     throw new \Exception('Invalid entries structure in GPT-4 response');
                 }
+
+                file_put_contents('/tmp/ocr_debug.log', "GPT Vision successful - found " . count($parsedData['entries']) . " entries\n", FILE_APPEND);
 
                 Log::info("GPT-4 Vision successful", [
                     'entries_count' => count($parsedData['entries']),
@@ -251,18 +269,8 @@ Rules:
                 ];
             }
 
-            $errorBody = $response->body();
-            $errorData = $response->json();
-
-            Log::error("OpenAI API failed", [
-                'status' => $response->status(),
-                'body' => $errorBody,
-                'error' => $errorData['error'] ?? 'Unknown error'
-            ]);
-
-            return ['success' => false, 'error' => 'OpenAI API failed: ' . ($errorData['error']['message'] ?? $errorBody)];
-
         } catch (\Exception $e) {
+            file_put_contents('/tmp/ocr_debug.log', "GPT Vision exception: " . $e->getMessage() . "\n", FILE_APPEND);
             Log::error('GPT-4 Vision failed', ['error' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
             return ['success' => false, 'error' => $e->getMessage()];
         }

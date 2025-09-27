@@ -31,12 +31,11 @@ class OCRController extends Controller
 
             Log::info("OCR: Processing image", ['user_id' => $userId, 'path' => $fullPath]);
 
-            // Try GPT-4 Vision first
+            // Try GPT-4 Vision first (düzeltildi)
             $result = $this->processWithGPTVision($fullPath);
 
             if (!$result['success']) {
                 Log::warning("GPT-4 Vision failed, falling back to Tesseract", ['error' => $result['error']]);
-                // Fallback to Tesseract OCR only if GPT-4 completely fails
                 $result = $this->processWithTesseract($fullPath);
             }
 
@@ -45,8 +44,6 @@ class OCRController extends Controller
             }
 
             Log::info("OCR: Processing result", ['result' => $result]);
-
-            Log::info("OCR: Parsed entries", ['count' => count($result['entries']), 'method' => $result['method']]);
 
             // Save valid entries to database
             $savedEntries = [];
@@ -58,7 +55,7 @@ class OCRController extends Controller
                     Log::info("Processing entry for save", ['entry' => $entryData]);
 
                     if ($this->isValidEntry($entryData)) {
-                        // Check for duplicate entries
+                        // Check for duplicate entries (düzeltildi)
                         $isDuplicate = $this->checkDuplicateEntry($userId, $entryData);
 
                         if ($isDuplicate) {
@@ -77,7 +74,7 @@ class OCRController extends Controller
                             'base_pay' => $entryData['base_pay'],
                             'tips' => $entryData['tips'],
                             'service_type' => $entryData['service_type'] ?? $this->determineServiceType($entryData),
-                            'notes' => 'OCR imported via ' . $result['method'],
+                            'notes' => 'OCR imported via ' . $result['method'] . ' - Start: ' . $entryData['start_time'],
                         ]);
 
                         $savedEntries[] = $workEntry;
@@ -123,12 +120,13 @@ class OCRController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'OCR processing failed: ' . $e->getMessage(),
+                'error_details' => $e->getMessage(),
             ], 500);
         }
     }
 
     /**
-     * Process image with OpenAI GPT-4 Vision API
+     * Process image with OpenAI GPT-4 Vision API (DÜZELTILDI)
      */
     private function processWithGPTVision($imagePath)
     {
@@ -139,7 +137,6 @@ class OCRController extends Controller
 
             Log::info("Starting GPT-4 Vision processing", ['path' => $imagePath]);
 
-            // Verify file exists and read it
             if (!file_exists($imagePath)) {
                 throw new \Exception('Image file not found: ' . $imagePath);
             }
@@ -151,49 +148,44 @@ class OCRController extends Controller
                 'Authorization' => 'Bearer ' . env('OPENAI_API_KEY'),
                 'Content-Type' => 'application/json',
             ])->post('https://api.openai.com/v1/chat/completions', [
-                'model' => 'gpt-4o', // Latest vision model
+                'model' => 'gpt-4-vision-preview', // DÜZELTILDI: Doğru model adı
                 'messages' => [
                     [
                         'role' => 'user',
                         'content' => [
                             [
                                 'type' => 'text',
-                                'text' => 'Extract ALL work entries from this Amazon Flex earnings screenshot.
+                                'text' => 'Extract work entries from this Amazon Flex earnings screenshot.
 
-Return ONLY a JSON object with this exact structure:
-
+Return JSON in this format:
 {
   "entries": [
     {
-      "date": "2024-09-18",
-      "start_time": "9:21 AM",
-      "end_time": "10:30 AM",
-      "total_earnings": 30.00,
-      "base_pay": null,
-      "tips": null,
-      "service_type": "logistics"
+      "date": "2024-09-26",
+      "start_time": "9:30 AM",
+      "end_time": "1:30 PM",
+      "total_earnings": 58.50,
+      "base_pay": 45.00,
+      "tips": 13.50,
+      "service_type": "whole_foods"
     }
   ]
 }
 
-STRICT RULES:
-- Date format: YYYY-MM-DD (assume current year 2024)
-- Time format: "H:MM AM/PM" (exact format with space)
-- total_earnings: THE MAIN DOLLAR AMOUNT shown prominently (e.g. $30, $53.50, $99, $81)
-- If you see "Base: $51.00 Tips: $48.00" format: total_earnings = base + tips (e.g. $99.00), base_pay = 51.00, tips = 48.00
-- If only one amount shown: that is total_earnings, set base_pay=null, tips=null
-- Service type: "whole_foods" if base+tips shown separately, "logistics" if just total
-- NEVER set total_earnings to 0.00 - it should be the main visible dollar amount
-- Include ALL visible entries in the screenshot
-- Return ONLY valid JSON, no explanation or additional text
-
-IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are the TOTAL EARNINGS, not components.'
+Rules:
+- Date: YYYY-MM-DD format (use 2024 if year not shown)
+- Times: "H:MM AM/PM" format with space
+- total_earnings: Main dollar amount visible
+- If base/tips shown separately: include both, service_type="whole_foods"
+- If only total shown: base_pay=null, tips=null, service_type="logistics"
+- Include ALL visible entries
+- Return only valid JSON'
                             ],
                             [
                                 'type' => 'image_url',
                                 'image_url' => [
                                     'url' => "data:{$mimeType};base64,{$base64Image}",
-                                    'detail' => 'high' // High detail for better OCR accuracy
+                                    'detail' => 'high'
                                 ]
                             ]
                         ]
@@ -203,7 +195,7 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
                     'type' => 'json_object'
                 ],
                 'max_tokens' => 2000,
-                'temperature' => 0.1 // Low temperature for consistent parsing
+                'temperature' => 0.1
             ]);
 
             if ($response->successful()) {
@@ -424,6 +416,34 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
     }
 
     /**
+     * Parse time range from line
+     */
+    private function parseTimeRange($timeLine)
+    {
+        try {
+            // Match patterns like "9:21 AM - 10:30 AM"
+            $patterns = [
+                '/(\d{1,2}:\d{2}\s+(AM|PM))\s*[-–—]\s*(\d{1,2}:\d{2}\s+(AM|PM))/i',
+                '/(\d{1,2}:\d{2}\s+(AM|PM))\s+to\s+(\d{1,2}:\d{2}\s+(AM|PM))/i',
+            ];
+
+            foreach ($patterns as $pattern) {
+                if (preg_match($pattern, $timeLine, $matches)) {
+                    return [
+                        'start' => trim($matches[1]),
+                        'end' => trim($matches[3])
+                    ];
+                }
+            }
+
+            return null;
+        } catch (\Exception $e) {
+            Log::error("parseTimeRange failed", ['line' => $timeLine, 'error' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    /**
      * Validate entry data
      */
     private function isValidEntry($entry)
@@ -516,40 +536,22 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
     }
 
     /**
-     * Check if entry already exists for user
+     * Check if entry already exists for user (DÜZELTILDI)
      */
     private function checkDuplicateEntry($userId, $entryData)
     {
         try {
-            // Parse start and end times to get precise time range
-            $startTime = $this->parseTimeToMinutes($entryData['start_time']);
-            $endTime = $this->parseTimeToMinutes($entryData['end_time']);
-
-            if ($startTime === null || $endTime === null) {
-                Log::warning("Could not parse time for duplicate check", ['entry' => $entryData]);
-                return false; // If we can't parse time, allow the entry
-            }
-
-            // Calculate hours worked for comparison
-            $hoursWorked = $this->calculateHoursFromTimes($entryData['start_time'], $entryData['end_time']);
-
-            // Check for existing entry with same date and similar time range
+            // Basit duplicate check: aynı gün, aynı start time, aynı earnings
             $existingEntry = WorkEntry::where('user_id', $userId)
                 ->where('date', $entryData['date'])
                 ->where('earnings', $entryData['total_earnings'])
-                ->where(function ($query) use ($hoursWorked) {
-                    // Allow small variance in hours (±0.1 hours = 6 minutes)
-                    $query->whereBetween('hours_worked', [$hoursWorked - 0.1, $hoursWorked + 0.1]);
-                })
+                ->where('notes', 'LIKE', '%Start: ' . $entryData['start_time'] . '%')
                 ->first();
 
             if ($existingEntry) {
                 Log::info("Duplicate entry found", [
                     'new_entry' => $entryData,
-                    'existing_entry_id' => $existingEntry->id,
-                    'existing_date' => $existingEntry->date,
-                    'existing_hours' => $existingEntry->hours_worked,
-                    'existing_earnings' => $existingEntry->earnings
+                    'existing_entry_id' => $existingEntry->id
                 ]);
                 return true;
             }
@@ -558,7 +560,7 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
 
         } catch (\Exception $e) {
             Log::error("Duplicate check failed", ['error' => $e->getMessage(), 'entry' => $entryData]);
-            return false; // If check fails, allow the entry to be safe
+            return false; // If check fails, allow the entry
         }
     }
 
@@ -658,7 +660,7 @@ IMPORTANT: The large dollar amounts you see ($51.00, $48.00, $58.00, etc.) are t
     {
         $patterns = [
             '/^\d{1,2}:\d{2}\s+(AM|PM)\s*-\s*\d{1,2}:\d{2}\s+(AM|PM)$/i',
-            '/\d{1,2}:\d{2}\s+(AM|PM)\s*[-–]\s*\d{1,2}:\d{2}\s+(AM|PM)/i',
+            '/\d{1,2}:\d{2}\s+(AM|PM)\s*[-–—]\s*\d{1,2}:\d{2}\s+(AM|PM)/i',
         ];
 
         foreach ($patterns as $pattern) {

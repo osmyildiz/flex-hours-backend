@@ -171,6 +171,8 @@ class OCRController extends Controller
 
             file_put_contents('/tmp/ocr_debug.log', "Sending OpenAI request...\n", FILE_APPEND);
 
+            $currentYear = date('Y');
+
             $response = Http::timeout(60)->withHeaders([
                 'Authorization' => 'Bearer ' . $apiKey,
                 'Content-Type' => 'application/json',
@@ -188,7 +190,7 @@ Return JSON in this format:
 {
   "entries": [
     {
-      "date": "2024-09-26",
+      "date": "' . $currentYear . '-09-26",
       "start_time": "9:30 AM",
       "end_time": "1:30 PM",
       "total_earnings": 58.50,
@@ -200,7 +202,7 @@ Return JSON in this format:
 }
 
 Rules:
-- Date: YYYY-MM-DD format (use 2024 if year not shown)
+- Date: YYYY-MM-DD format (use ' . $currentYear . ' if year not shown)
 - Times: "H:MM AM/PM" format with space
 - total_earnings: Main dollar amount visible
 - If base/tips shown separately: include both, service_type="whole_foods"

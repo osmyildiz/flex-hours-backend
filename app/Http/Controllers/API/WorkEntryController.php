@@ -132,118 +132,61 @@ class WorkEntryController extends Controller
         $now = Carbon::now($userTimezone);
         $today = $now->format('Y-m-d');
 
-        // DEBUG: Son 30 günlük veriyi kontrol et
-        $debugEntries = WorkEntry::where('user_id', $userId)
-            ->where('date', '>=', $now->copy()->subDays(30)->format('Y-m-d'))
-            ->orderBy('date', 'desc')
-            ->get(['date', 'hours_worked', 'earnings']);
+        // En son entry'den 7 gün geriye git
+        $latestEntry = WorkEntry::where('user_id', $userId)->orderBy('date', 'desc')->first();
 
-        // ROLLING 7-DAY WINDOW (bugünden geriye 6 gün)
-        $startDate = $now->copy()->subDays(6)->format('Y-m-d');
-        $endDate = $today;
+        if (!$latestEntry) {
+            // Default values if no entries
+            $totalHours = 0;
+            $totalEarnings = 0;
+            $startDate = $today;
+            $endDate = $today;
+        } else {
+            $latestDate = Carbon::parse($latestEntry->date);
+            $endDate = $latestDate->format('Y-m-d');
+            $startDate = $latestDate->copy()->subDays(6)->format('Y-m-d');
 
-        $entries = WorkEntry::where('user_id', $userId)
-            ->whereBetween('date', [$startDate, $endDate])
-            ->get();
+            $entries = WorkEntry::where('user_id', $userId)
+                ->whereBetween('date', [$startDate, $endDate])
+                ->get();
 
-        // Weekly totals (rolling 7-day)
-        $totalHours = $entries->sum('hours_worked');
-        $totalEarnings = $entries->sum('earnings');
+            $totalHours = $entries->sum('hours_worked');
+            $totalEarnings = $entries->sum('earnings');
+        }
 
-        // Today entries (in user's timezone)
+        // Today entries
         $todayEntries = WorkEntry::where('user_id', $userId)
             ->where('date', $today)
             ->get();
         $todayHours = $todayEntries->sum('hours_worked');
         $todayEarnings = $todayEntries->sum('earnings');
 
-        // Constants
         $weeklyLimit = 40.0;
         $dailyLimit = 8.0;
-
-        // TODAY AVAILABLE CALCULATION
-        $todayAvailable = max(0, $dailyLimit - $todayHours);
-
-        // TOMORROW AVAILABLE CALCULATION
-        $tomorrowDropDate = $now->copy()->addDay()->subDays(6)->format('Y-m-d');
-        $tomorrowDropHours = WorkEntry::where('user_id', $userId)
-            ->where('date', $tomorrowDropDate)
-            ->sum('hours_worked');
-
-        $tomorrowProjectedWeekly = $totalHours - $tomorrowDropHours;
-        $tomorrowWeeklyAvailable = max(0, $weeklyLimit - $tomorrowProjectedWeekly);
-        $tomorrowAvailable = min($dailyLimit, $tomorrowWeeklyAvailable);
-
-        // Recent activity (only today's entries in user timezone)
-        $todayRecentEntries = WorkEntry::where('user_id', $userId)
-            ->where('date', $today)
-            ->orderBy('created_at', 'desc')
-            ->get()
-            ->map(function ($entry) use ($userTimezone) {
-                return [
-                    'id' => $entry->id,
-                    'date' => $entry->date,
-                    'hours_worked' => round($entry->hours_worked, 2),
-                    'earnings' => round($entry->earnings, 2),
-                    'base_pay' => $entry->base_pay ? round($entry->base_pay, 2) : null,
-                    'tips' => $entry->tips ? round($entry->tips, 2) : null,
-                    'service_type' => $entry->service_type,
-                    'created_at' => Carbon::parse($entry->created_at)->setTimezone($userTimezone)->format('g:i A')
-                ];
-            });
 
         return response()->json([
             'success' => true,
             'data' => [
-                'debug_info' => [
-                    'user_timezone' => $userTimezone,
-                    'today_date' => $today,
-                    'weekly_range' => ['start' => $startDate, 'end' => $endDate],
-                    'entries_in_weekly_range' => $entries->count(),
-                    'entries_today' => $todayEntries->count(),
-                    'recent_30_days_sample' => $debugEntries->take(5)->map(function($entry) {
-                        return [
-                            'date' => $entry->date,
-                            'hours' => $entry->hours_worked,
-                            'earnings' => $entry->earnings
-                        ];
-                    }),
-                    'total_user_entries' => WorkEntry::where('user_id', $userId)->count(),
-                    'latest_entry_date' => optional(WorkEntry::where('user_id', $userId)->orderBy('date', 'desc')->first())->date,
-                    'oldest_entry_date' => optional(WorkEntry::where('user_id', $userId)->orderBy('date', 'asc')->first())->date
-
-                ],
                 'weekly' => [
                     'total_hours' => round($totalHours, 2),
                     'total_earnings' => round($totalEarnings, 2),
-                    'total_miles' => round($entries->sum('miles'), 2),
-                    'total_gas_cost' => round($entries->sum('gas_cost'), 2),
                     'remaining_hours' => round($weeklyLimit - $totalHours, 2),
                     'progress_percentage' => round(($totalHours / $weeklyLimit) * 100, 1),
                     'date_range' => [
                         'start' => Carbon::parse($startDate)->format('M j'),
-                        'end' => $now->format('M j')
+                        'end' => Carbon::parse($endDate)->format('M j')
                     ]
                 ],
                 'today' => [
                     'hours' => round($todayHours, 2),
                     'earnings' => round($todayEarnings, 2),
                     'hourly_rate' => $todayHours > 0 ? round($todayEarnings / $todayHours, 2) : 0,
-                    'available_hours' => round($todayAvailable, 2)
+                    'available_hours' => round(max(0, $dailyLimit - $todayHours), 2)
                 ],
                 'tomorrow' => [
-                    'available_hours' => round($tomorrowAvailable, 2),
-                    'debug' => [
-                        'user_timezone' => $userTimezone,
-                        'user_today' => $today,
-                        'current_weekly' => round($totalHours, 2),
-                        'tomorrow_drop_date' => $tomorrowDropDate,
-                        'tomorrow_drop_hours' => round($tomorrowDropHours, 2),
-                        'projected_weekly' => round($tomorrowProjectedWeekly, 2),
-                        'weekly_available' => round($tomorrowWeeklyAvailable, 2)
-                    ]
+                    'available_hours' => 8.0
                 ],
-                'recent_entries' => $todayRecentEntries
+                'recent_entries' => []
             ]
         ]);
     }

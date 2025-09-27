@@ -17,8 +17,11 @@ class OCRController extends Controller
      */
     public function processScreenshot(Request $request)
     {
+        error_log("=== OCR REQUEST STARTED ===");
+        Log::emergency("OCR REQUEST DEBUG - This should appear!");
+
         $request->validate([
-            'image' => 'required|image|max:10240', // 10MB max
+            'image' => 'required|image|max:10240',
         ]);
 
         $userId = auth()->id();

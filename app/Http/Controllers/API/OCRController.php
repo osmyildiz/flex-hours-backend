@@ -576,17 +576,17 @@ Rules:
     private function checkDuplicateEntry($userId, $entryData)
     {
         try {
-            // Basit duplicate check: aynı gün, aynı start time, aynı earnings
+            // Aynı kullanıcı, aynı tarih, aynı start time kontrolü
             $existingEntry = WorkEntry::where('user_id', $userId)
                 ->where('date', $entryData['date'])
-                ->where('earnings', $entryData['total_earnings'])
                 ->where('notes', 'LIKE', '%Start: ' . $entryData['start_time'] . '%')
                 ->first();
 
             if ($existingEntry) {
-                Log::info("Duplicate entry found", [
-                    'new_entry' => $entryData,
-                    'existing_entry_id' => $existingEntry->id
+                Log::info("Duplicate found", [
+                    'existing_date' => $existingEntry->date,
+                    'existing_notes' => $existingEntry->notes,
+                    'new_start_time' => $entryData['start_time']
                 ]);
                 return true;
             }
@@ -594,11 +594,10 @@ Rules:
             return false;
 
         } catch (\Exception $e) {
-            Log::error("Duplicate check failed", ['error' => $e->getMessage(), 'entry' => $entryData]);
-            return false; // If check fails, allow the entry
+            Log::error("Duplicate check failed", ['error' => $e->getMessage()]);
+            return false;
         }
     }
-
     /**
      * Parse time string to minutes since midnight
      */

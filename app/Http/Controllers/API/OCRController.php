@@ -137,19 +137,33 @@ class OCRController extends Controller
      */
     private function processWithGPTVision($imagePath)
     {
+        file_put_contents('/tmp/ocr_debug.log', "GPT Vision method started\n", FILE_APPEND);
+
         try {
-            if (!env('OPENAI_API_KEY')) {
+            $apiKey = env('OPENAI_API_KEY');
+            file_put_contents('/tmp/ocr_debug.log', "API Key length: " . strlen($apiKey ?? '') . "\n", FILE_APPEND);
+
+            if (!$apiKey) {
+                file_put_contents('/tmp/ocr_debug.log', "No API key found\n", FILE_APPEND);
                 return ['success' => false, 'error' => 'OpenAI API key not configured'];
             }
 
             Log::info("Starting GPT-4 Vision processing", ['path' => $imagePath]);
+            file_put_contents('/tmp/ocr_debug.log', "Image path: " . $imagePath . "\n", FILE_APPEND);
 
             if (!file_exists($imagePath)) {
+                file_put_contents('/tmp/ocr_debug.log', "Image file not found\n", FILE_APPEND);
                 throw new \Exception('Image file not found: ' . $imagePath);
             }
 
+            file_put_contents('/tmp/ocr_debug.log', "Reading image file...\n", FILE_APPEND);
             $base64Image = base64_encode(file_get_contents($imagePath));
+            file_put_contents('/tmp/ocr_debug.log', "Base64 length: " . strlen($base64Image) . "\n", FILE_APPEND);
+
             $mimeType = $this->getMimeType($imagePath);
+            file_put_contents('/tmp/ocr_debug.log', "MIME type: " . $mimeType . "\n", FILE_APPEND);
+
+            file_put_contents('/tmp/ocr_debug.log', "Sending OpenAI request...\n", FILE_APPEND);
 
             $response = Http::timeout(60)->withHeaders([
                 'Authorization' => 'Bearer ' . env('OPENAI_API_KEY'),

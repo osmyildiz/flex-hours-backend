@@ -59,19 +59,24 @@ class OCRController extends Controller
 
             foreach ($result['entries'] as $entryData) {
                 try {
-                    Log::info("Processing entry for save", ['entry' => $entryData]);
+                    file_put_contents('/tmp/ocr_debug.log', "Processing entry: " . json_encode($entryData) . "\n", FILE_APPEND);
 
                     if ($this->isValidEntry($entryData)) {
-                        // Check for duplicate entries (düzeltildi)
+                        file_put_contents('/tmp/ocr_debug.log', "Entry is valid\n", FILE_APPEND);
+
+                        // Check for duplicate entries
                         $isDuplicate = $this->checkDuplicateEntry($userId, $entryData);
 
                         if ($isDuplicate) {
+                            file_put_contents('/tmp/ocr_debug.log', "Entry is duplicate\n", FILE_APPEND);
                             $duplicateEntries[] = $entryData;
-                            Log::info("Duplicate entry skipped", ['entry' => $entryData]);
                             continue;
                         }
 
+                        file_put_contents('/tmp/ocr_debug.log', "Creating WorkEntry...\n", FILE_APPEND);
+
                         $hoursWorked = $this->calculateHoursFromTimes($entryData['start_time'], $entryData['end_time']);
+                        file_put_contents('/tmp/ocr_debug.log', "Hours calculated: " . $hoursWorked . "\n", FILE_APPEND);
 
                         $workEntry = WorkEntry::create([
                             'user_id' => $userId,
@@ -84,14 +89,15 @@ class OCRController extends Controller
                             'notes' => 'OCR imported via ' . $result['method'] . ' - Start: ' . $entryData['start_time'],
                         ]);
 
+                        file_put_contents('/tmp/ocr_debug.log', "WorkEntry created with ID: " . $workEntry->id . "\n", FILE_APPEND);
+
                         $savedEntries[] = $workEntry;
-                        Log::info("Entry saved successfully", ['entry_id' => $workEntry->id]);
                     } else {
+                        file_put_contents('/tmp/ocr_debug.log', "Entry validation failed\n", FILE_APPEND);
                         $skippedEntries[] = $entryData;
-                        Log::warning("Entry validation failed", ['entry' => $entryData]);
                     }
                 } catch (\Exception $e) {
-                    Log::error("Failed to save entry", ['entry' => $entryData, 'error' => $e->getMessage()]);
+                    file_put_contents('/tmp/ocr_debug.log', "Exception: " . $e->getMessage() . "\n", FILE_APPEND);
                     $skippedEntries[] = $entryData;
                 }
             }

@@ -132,8 +132,14 @@ class WorkEntryController extends Controller
         $now = Carbon::now($userTimezone);
         $today = $now->format('Y-m-d');
 
-        // ROLLING 7-DAY WINDOW (today included, 7 days back)
-        $startDate = $now->copy()->subDays(6)->format('Y-m-d'); // 6 days ago + today = 7 days
+        // DEBUG: Son 30 günlük veriyi kontrol et
+        $debugEntries = WorkEntry::where('user_id', $userId)
+            ->where('date', '>=', $now->copy()->subDays(30)->format('Y-m-d'))
+            ->orderBy('date', 'desc')
+            ->get(['date', 'hours_worked', 'earnings']);
+
+        // ROLLING 7-DAY WINDOW (bugünden geriye 6 gün)
+        $startDate = $now->copy()->subDays(6)->format('Y-m-d');
         $endDate = $today;
 
         $entries = WorkEntry::where('user_id', $userId)
@@ -189,6 +195,23 @@ class WorkEntryController extends Controller
         return response()->json([
             'success' => true,
             'data' => [
+                'debug_info' => [
+                    'user_timezone' => $userTimezone,
+                    'today_date' => $today,
+                    'weekly_range' => ['start' => $startDate, 'end' => $endDate],
+                    'entries_in_weekly_range' => $entries->count(),
+                    'entries_today' => $todayEntries->count(),
+                    'recent_30_days_sample' => $debugEntries->take(5)->map(function($entry) {
+                        return [
+                            'date' => $entry->date,
+                            'hours' => $entry->hours_worked,
+                            'earnings' => $entry->earnings
+                        ];
+                    }),
+                    'total_user_entries' => WorkEntry::where('user_id', $userId)->count(),
+                    'latest_entry_date' => WorkEntry::where('user_id', $userId)->orderBy('date', 'desc')->first()?->date,
+                    'oldest_entry_date' => WorkEntry::where('user_id', $userId)->orderBy('date', 'asc')->first()?->date
+                ],
                 'weekly' => [
                     'total_hours' => round($totalHours, 2),
                     'total_earnings' => round($totalEarnings, 2),
@@ -223,7 +246,6 @@ class WorkEntryController extends Controller
             ]
         ]);
     }
-
     public function stats(Request $request): JsonResponse
     {
         $period = $request->get('period', '30d');

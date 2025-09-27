@@ -17,28 +17,21 @@ class OCRController extends Controller
      */
     public function processScreenshot(Request $request)
     {
-        error_log("=== OCR REQUEST STARTED ===");
-        Log::emergency("OCR REQUEST DEBUG - This should appear!");
         file_put_contents('/tmp/ocr_debug.log', "OCR started: " . date('Y-m-d H:i:s') . "\n", FILE_APPEND);
 
         $request->validate([
             'image' => 'required|image|max:10240',
         ]);
 
-        $userId = auth()->id();
-
         try {
             // Save uploaded image
-            file_put_contents('/tmp/ocr_debug.log', "Starting image processing\n", FILE_APPEND);
-
             $image = $request->file('image');
             $imagePath = $image->store('ocr_uploads', 'public');
             $fullPath = storage_path('app/public/' . $imagePath);
+
             file_put_contents('/tmp/ocr_debug.log', "Image saved to: " . $fullPath . "\n", FILE_APPEND);
 
-            Log::info("OCR: Processing image", ['user_id' => $userId, 'path' => $fullPath]);
-
-            // Try GPT-4 Vision first (düzeltildi)
+            // Try GPT-4 Vision first
             $result = $this->processWithGPTVision($fullPath);
 
             if (!$result['success']) {
@@ -50,54 +43,14 @@ class OCRController extends Controller
                 throw new \Exception('All OCR methods failed: ' . $result['error']);
             }
 
-            Log::info("OCR: Processing result", ['result' => $result]);
-
-            // Save valid entries to database
-            $savedEntries = [];
-            $duplicateEntries = [];
+            // Validate entries but DON'T save them
+            $validEntries = [];
             $skippedEntries = [];
 
             foreach ($result['entries'] as $entryData) {
-                try {
-                    file_put_contents('/tmp/ocr_debug.log', "Processing entry: " . json_encode($entryData) . "\n", FILE_APPEND);
-
-                    if ($this->isValidEntry($entryData)) {
-                        file_put_contents('/tmp/ocr_debug.log', "Entry is valid\n", FILE_APPEND);
-
-                        // Check for duplicate entries
-                        $isDuplicate = $this->checkDuplicateEntry($userId, $entryData);
-
-                        if ($isDuplicate) {
-                            file_put_contents('/tmp/ocr_debug.log', "Entry is duplicate\n", FILE_APPEND);
-                            $duplicateEntries[] = $entryData;
-                            continue;
-                        }
-
-                        file_put_contents('/tmp/ocr_debug.log', "Creating WorkEntry...\n", FILE_APPEND);
-
-                        $hoursWorked = $this->calculateHoursFromTimes($entryData['start_time'], $entryData['end_time']);
-                        file_put_contents('/tmp/ocr_debug.log', "Hours calculated: " . $hoursWorked . "\n", FILE_APPEND);
-
-                        $workEntry = WorkEntry::create([
-                            'user_id' => $userId,
-                            'date' => $entryData['date'],
-                            'hours_worked' => $hoursWorked,
-                            'earnings' => $entryData['total_earnings'],
-                            'base_pay' => $entryData['base_pay'],
-                            'tips' => $entryData['tips'],
-                            'service_type' => $entryData['service_type'] ?? $this->determineServiceType($entryData),
-                            'notes' => 'OCR imported via ' . $result['method'] . ' - Start: ' . $entryData['start_time'],
-                        ]);
-
-                        file_put_contents('/tmp/ocr_debug.log', "WorkEntry created with ID: " . $workEntry->id . "\n", FILE_APPEND);
-
-                        $savedEntries[] = $workEntry;
-                    } else {
-                        file_put_contents('/tmp/ocr_debug.log', "Entry validation failed\n", FILE_APPEND);
-                        $skippedEntries[] = $entryData;
-                    }
-                } catch (\Exception $e) {
-                    file_put_contents('/tmp/ocr_debug.log', "Exception: " . $e->getMessage() . "\n", FILE_APPEND);
+                if ($this->isValidEntry($entryData)) {
+                    $validEntries[] = $entryData;
+                } else {
                     $skippedEntries[] = $entryData;
                 }
             }
@@ -108,24 +61,16 @@ class OCRController extends Controller
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'parsed_entries' => $result['entries'],
-                    'saved_entries' => count($savedEntries),
-                    'duplicate_entries' => count($duplicateEntries),
+                    'parsed_entries' => $validEntries, // Only valid entries
                     'skipped_entries' => count($skippedEntries),
-                    'entries' => $savedEntries,
                     'method' => $result['method'],
                 ],
-                'message' => $this->buildSummaryMessage($savedEntries, $duplicateEntries, $skippedEntries),
+                'message' => 'Found ' . count($validEntries) . ' valid entries',
             ]);
 
         } catch (\Exception $e) {
-            Log::error("OCR processing failed", [
-                'user_id' => $userId,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
+            Log::error("OCR processing failed", ['error' => $e->getMessage()]);
 
-            // Clean up file if it exists
             if (isset($imagePath)) {
                 Storage::disk('public')->delete($imagePath);
             }

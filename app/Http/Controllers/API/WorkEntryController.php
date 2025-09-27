@@ -209,8 +209,9 @@ class WorkEntryController extends Controller
                         ];
                     }),
                     'total_user_entries' => WorkEntry::where('user_id', $userId)->count(),
-                    'latest_entry_date' => WorkEntry::where('user_id', $userId)->orderBy('date', 'desc')->first()?->date,
-                    'oldest_entry_date' => WorkEntry::where('user_id', $userId)->orderBy('date', 'asc')->first()?->date
+                    'latest_entry_date' => optional(WorkEntry::where('user_id', $userId)->orderBy('date', 'desc')->first())->date,
+                    'oldest_entry_date' => optional(WorkEntry::where('user_id', $userId)->orderBy('date', 'asc')->first())->date
+
                 ],
                 'weekly' => [
                     'total_hours' => round($totalHours, 2),

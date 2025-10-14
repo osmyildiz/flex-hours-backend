@@ -23,6 +23,20 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/user', [AuthController::class, 'user']);
 
+    Route::get('/user/premium-status', function (Request $request) {
+        $user = $request->user();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'is_premium' => $user->is_premium,
+                'subscription_type' => $user->subscription_type,
+                'premium_expires_at' => $user->premium_expires_at,
+                'can_access_premium_features' => $user->canAccessPremiumFeatures(),
+            ],
+        ]);
+    });
+
     Route::post('/ocr/upload', [OCRController::class, 'processScreenshot']);
 
     // TEST ENDPOINT - geçici

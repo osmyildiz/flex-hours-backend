@@ -40,7 +40,11 @@ class User extends Authenticatable
         'trial_used' => 'boolean',
     ];
 
-    // Helper methods
+    public function workEntries()
+    {
+        return $this->hasMany(WorkEntry::class);
+    }
+
     public function isPremiumActive(): bool
     {
         if (!$this->is_premium) {
@@ -66,6 +70,7 @@ class User extends Authenticatable
     {
         return $this->isPremiumActive() || $this->isOnTrial();
     }
+
 
     public function daysUntilExpiration(): ?int
     {
